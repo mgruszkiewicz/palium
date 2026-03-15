@@ -54,13 +54,6 @@ palium/
     └── SpeedGraphView.swift     Sparkline area chart for download speed
 ```
 
-### Key design decisions
-
-- **No external dependencies** — uses only Foundation, SwiftUI, CryptoKit, and URLSession
-- **`nonisolated` services** — the project defaults to `@MainActor` isolation; services opt out explicitly
-- **Streaming downloads** — large game files (up to 11 GB) are streamed to disk via `URLSessionDownloadDelegate`, never held in memory
-- **FlexBuffers parser** — the Palia CDN serves manifests in Google's FlexBuffers format; a custom parser decodes them without any third-party library
-
 ## How it works
 
 1. **Detect Wine** — finds a usable `wine64` binary (GPTK paths, Whisky paths, or app bundle)

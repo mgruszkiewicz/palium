@@ -5,9 +5,7 @@ struct SpeedGraphView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let maxVal = samples.max() ?? 1
-            let minVal: Double = 0
-            let range = max(maxVal - minVal, 1)
+            let maxVal = max(samples.max() ?? 1, 1)
 
             ZStack(alignment: .bottomLeading) {
                 // Filled area
@@ -17,7 +15,7 @@ struct SpeedGraphView: View {
 
                     for (i, sample) in samples.enumerated() {
                         let x = CGFloat(i) * stepX
-                        let y = geo.size.height * (1 - CGFloat((sample - minVal) / range))
+                        let y = geo.size.height * (1 - CGFloat(sample / maxVal))
                         path.addLine(to: CGPoint(x: x, y: y))
                     }
 
@@ -38,7 +36,7 @@ struct SpeedGraphView: View {
 
                     for (i, sample) in samples.enumerated() {
                         let x = CGFloat(i) * stepX
-                        let y = geo.size.height * (1 - CGFloat((sample - minVal) / range))
+                        let y = geo.size.height * (1 - CGFloat(sample / maxVal))
                         if i == 0 {
                             path.move(to: CGPoint(x: x, y: y))
                         } else {

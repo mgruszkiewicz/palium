@@ -12,6 +12,7 @@ struct LogEntry: Identifiable, Sendable {
     let message: String
 }
 
+@MainActor
 @Observable
 class AppState {
 
@@ -60,8 +61,13 @@ class AppState {
         return false
     }
 
+    private static let maxLogEntries = 1000
+
     func log(_ message: String, level: LogEntry.Level = .info) {
         logEntries.append(LogEntry(level: level, message: message))
+        if logEntries.count > Self.maxLogEntries {
+            logEntries.removeFirst(logEntries.count - Self.maxLogEntries)
+        }
     }
 
     func clearLog() {

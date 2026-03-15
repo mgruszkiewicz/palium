@@ -402,8 +402,8 @@ struct WineManagerTests {
         let overrides = env["WINEDLLOVERRIDES"] ?? ""
         #expect(overrides.contains("dxgi"))
         #expect(overrides.contains("d3d11"))
-        #expect(overrides.contains("msvcp140"))
-        #expect(overrides.contains("vcruntime140"))
+        #expect(overrides.contains("d3d9"))
+        #expect(overrides.contains("d3d10core"))
         #expect(overrides.contains("n,b"))
     }
 
@@ -430,6 +430,7 @@ struct WineManagerTests {
 
 // MARK: - AppState Tests
 
+@MainActor
 struct AppStateTests {
 
     @Test func initialPhase() {
@@ -496,7 +497,7 @@ struct AppStateTests {
 
 // MARK: - FlexValue Equatable (for test assertions)
 
-extension FlexValue: Equatable {
+extension FlexValue: @retroactive Equatable {
     public static func == (lhs: FlexValue, rhs: FlexValue) -> Bool {
         switch (lhs, rhs) {
         case (.null, .null): return true

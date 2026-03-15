@@ -8,9 +8,9 @@
 import SwiftUI
 
 @main
-struct paliumApp: App {
+struct PaliumApp: App {
     var body: some Scene {
-        WindowGroup {
+        Window("Palium", id: "main") {
             ContentView()
         }
         .defaultSize(width: 500, height: 400)

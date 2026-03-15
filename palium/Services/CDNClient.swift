@@ -51,7 +51,12 @@ nonisolated enum CDNClient {
 
     static func fileURL(version: String, path: String) -> URL {
         let encodedPath = path.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? path
-        return URL(string: "\(baseURL)/bundle/\(bundle)/v/\(version)/\(platform)/file/\(encodedPath)")!
+        guard let url = URL(string: "\(baseURL)/bundle/\(bundle)/v/\(version)/\(platform)/file/\(encodedPath)") else {
+            // Fallback: percent-encode the entire path component to handle edge cases
+            let safeEncoded = path.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? path
+            return URL(string: "\(baseURL)/bundle/\(bundle)/v/\(version)/\(platform)/file/\(safeEncoded)")!
+        }
+        return url
     }
 
     // MARK: - Manifest Parsing

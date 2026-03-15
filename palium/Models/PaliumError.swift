@@ -1,6 +1,6 @@
 import Foundation
 
-enum PaliumError: LocalizedError {
+enum PaliumError: LocalizedError, Sendable, Equatable {
     case wineNotFound
     case noBottleFound
     case gameNotInstalled

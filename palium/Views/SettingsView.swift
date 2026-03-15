@@ -157,20 +157,11 @@ struct SettingsView: View {
     }
 
     private var gptkPath: String? {
-        let candidates = [
-            "/opt/homebrew/bin/wine64",
-            "/usr/local/bin/wine64",
-            "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64",
-        ]
-        return candidates.first { FileManager.default.fileExists(atPath: $0) }
+        WineManager.findGPTKBinary()?.path
     }
 
     private var whiskyPath: String? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let path = home.appendingPathComponent(
-            "Library/Application Support/com.isaacmarovitz.Whisky/Libraries/Wine/bin/wine64"
-        ).path
-        return FileManager.default.fileExists(atPath: path) ? path : nil
+        WineManager.findWhiskyBinary()?.path
     }
 
     // MARK: - Graphics Tab

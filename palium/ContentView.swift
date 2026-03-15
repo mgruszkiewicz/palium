@@ -3,6 +3,7 @@ import SwiftUI
 struct ContentView: View {
     @State private var appState = AppState()
     @State private var showGPTKInstallAlert = false
+    @State private var downloadTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -213,7 +214,7 @@ struct ContentView: View {
             }
 
             Button("Download") {
-                Task { await startDownload() }
+                startDownload()
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
@@ -254,8 +255,16 @@ struct ContentView: View {
                     .truncationMode(.middle)
             }
 
-            Text("\(Int(appState.downloadProgress * 100))%")
-                .font(.title2.monospacedDigit())
+            HStack {
+                Text("\(Int(appState.downloadProgress * 100))%")
+                    .font(.title2.monospacedDigit())
+                Spacer()
+                Button("Cancel") {
+                    cancelDownload()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
         }
     }
 
@@ -432,7 +441,7 @@ struct ContentView: View {
         }
     }
 
-    private func startDownload() async {
+    private func startDownload() {
         guard let manifest = appState.manifest, let info = appState.wineInfo else { return }
 
         appState.phase = .downloading
@@ -442,20 +451,32 @@ struct ContentView: View {
 
         let downloadManager = makeDownloadManager()
 
-        do {
-            try await downloadManager.downloadAll(
-                manifest: manifest,
-                version: appState.gameVersion,
-                installDirectory: info.gameInstallPath
-            )
-            appState.phase = .ready
-        } catch let error as PaliumError {
-            appState.log("Download failed: \(error.localizedDescription)", level: .error)
-            appState.phase = .error(error)
-        } catch {
-            appState.log("Download failed: \(error.localizedDescription)", level: .error)
-            appState.phase = .error(.downloadFailed(path: "", reason: error.localizedDescription))
+        downloadTask = Task {
+            do {
+                try await downloadManager.downloadAll(
+                    manifest: manifest,
+                    version: appState.gameVersion,
+                    installDirectory: info.gameInstallPath
+                )
+                appState.phase = .ready
+            } catch is CancellationError {
+                appState.log("Download cancelled", level: .warning)
+                appState.phase = .needsDownload
+            } catch let error as PaliumError {
+                appState.log("Download failed: \(error.localizedDescription)", level: .error)
+                appState.phase = .error(error)
+            } catch {
+                appState.log("Download failed: \(error.localizedDescription)", level: .error)
+                appState.phase = .error(.downloadFailed(path: "", reason: error.localizedDescription))
+            }
+            downloadTask = nil
         }
+    }
+
+    private func cancelDownload() {
+        downloadTask?.cancel()
+        downloadTask = nil
+        appState.log("Cancelling download...", level: .warning)
     }
 
     private func launchGame() {
@@ -575,14 +596,4 @@ struct ContentView: View {
         return String(format: "%.0f B/s", bytesPerSecond)
     }
 
-    private func formatSize(_ bytes: UInt64) -> String {
-        if bytes >= 1024 * 1024 * 1024 {
-            return String(format: "%.2f GB", Double(bytes) / (1024 * 1024 * 1024))
-        } else if bytes >= 1024 * 1024 {
-            return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
-        } else if bytes >= 1024 {
-            return String(format: "%.0f KB", Double(bytes) / 1024)
-        }
-        return "\(bytes) B"
-    }
 }

@@ -1,8 +1,17 @@
 import Foundation
 
+import os
+
 nonisolated enum WineManager {
 
     private static let gptkPrefixRelativePath = "Library/Application Support/com.palium/prefix"
+
+    // GPTK paths
+    static let gptkCandidatePaths = [
+        "/opt/homebrew/bin/wine64",
+        "/usr/local/bin/wine64",
+        "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64",
+    ]
 
     // Whisky paths
     private static let whiskyAppPath = "/Applications/Whisky.app"
@@ -93,12 +102,7 @@ nonisolated enum WineManager {
     }
 
     static func findGPTKBinary() -> URL? {
-        let candidates = [
-            "/opt/homebrew/bin/wine64",
-            "/usr/local/bin/wine64",
-            "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64",
-        ]
-        for path in candidates {
+        for path in gptkCandidatePaths {
             if FileManager.default.fileExists(atPath: path) {
                 return URL(fileURLWithPath: path)
             }
@@ -106,7 +110,7 @@ nonisolated enum WineManager {
         return nil
     }
 
-    private static func findWhiskyBinary() -> URL? {
+    static func findWhiskyBinary() -> URL? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let path = home.appendingPathComponent(whiskyWineRelativePath)
         return FileManager.default.fileExists(atPath: path.path) ? path : nil
@@ -114,12 +118,7 @@ nonisolated enum WineManager {
 
     /// Check if GPTK is installed via Homebrew (not just any wine binary).
     static var isGPTKInstalled: Bool {
-        let candidates = [
-            "/opt/homebrew/bin/wine64",
-            "/usr/local/bin/wine64",
-            "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64",
-        ]
-        return candidates.contains { FileManager.default.fileExists(atPath: $0) }
+        gptkCandidatePaths.contains { FileManager.default.fileExists(atPath: $0) }
     }
 
     /// Check if Whisky.app is installed.
@@ -185,7 +184,7 @@ nonisolated enum WineManager {
         }
 
         let users = try fm.contentsOfDirectory(atPath: usersDir.path)
-        let filtered = users.filter { $0 != "Public" && !$0.hasPrefix(".") }
+        let filtered = users.filter { $0 != "Public" && !$0.hasPrefix(".") && !$0.contains("Default")}
 
         guard let username = filtered.first else {
             throw PaliumError.noBottleFound
@@ -207,7 +206,7 @@ nonisolated enum WineManager {
         env["WINEPREFIX"] = info.prefixPath.path
         env["WINEBOOT_HIDE_DIALOG"] = "1"
         env["WINEDEBUG"] = "-all"
-        env["WINEDLLOVERRIDES"] = "dxgi,d3d9,d3d10core,d3d11,msvcp140,msvcp140_1,msvcp140_2,vcruntime140,vcruntime140_1,vcruntime140_threads,concrt140,ucrtbase,vcomp140,mfc140u,vccorlib140=n,b"
+        env["WINEDLLOVERRIDES"] = "dxgi,d3d9,d3d10core,d3d11=n,b"
         env["WINEMSYNC"] = "1"
         env["DXVK_ASYNC"] = "1"
         env["DXVK_STATE_CACHE"] = "1"
@@ -222,7 +221,8 @@ nonisolated enum WineManager {
     private static func runWineAsync(
         binary: URL,
         prefix: URL,
-        arguments: [String]
+        arguments: [String],
+        timeout: TimeInterval = 120
     ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let process = Process()
@@ -236,7 +236,15 @@ nonisolated enum WineManager {
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
 
+            let didResume = OSAllocatedUnfairLock(initialState: false)
+
             process.terminationHandler = { proc in
+                let shouldResume = didResume.withLock { flag -> Bool in
+                    if flag { return false }
+                    flag = true
+                    return true
+                }
+                guard shouldResume else { return }
                 if proc.terminationStatus == 0 {
                     continuation.resume()
                 } else {
@@ -246,29 +254,36 @@ nonisolated enum WineManager {
                 }
             }
 
+            // Timeout
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                let shouldResume = didResume.withLock { flag -> Bool in
+                    if flag { return false }
+                    flag = true
+                    return true
+                }
+                guard shouldResume else { return }
+                if process.isRunning { process.terminate() }
+                continuation.resume(throwing: PaliumError.launchFailed(
+                    "Wine process timed out after \(Int(timeout))s"
+                ))
+            }
+
             do {
                 try process.run()
             } catch {
+                let shouldResume = didResume.withLock { flag -> Bool in
+                    if flag { return false }
+                    flag = true
+                    return true
+                }
+                guard shouldResume else { return }
                 continuation.resume(throwing: error)
             }
         }
     }
 
-    /// Check if VC++ runtime is properly installed (real DLLs + registry).
+    /// Check if VC++ runtime registry keys are present in the Wine prefix.
     static func isVCRuntimeInstalled(info: WineInfo) -> Bool {
-        let fm = FileManager.default
-        let sys32 = info.prefixPath.appendingPathComponent("drive_c/windows/system32")
-
-        // Check that vcruntime140.dll exists and is a real Microsoft DLL (>100KB),
-        // not a tiny Wine builtin stub
-        let vcrt = sys32.appendingPathComponent("vcruntime140.dll").path
-        guard fm.fileExists(atPath: vcrt),
-              let attrs = try? fm.attributesOfItem(atPath: vcrt),
-              let size = attrs[.size] as? UInt64,
-              size > 100_000 else {
-            return false
-        }
-
         // Check registry has the full VC++ Runtimes entry
         let registryFile = info.prefixPath.appendingPathComponent("system.reg")
         guard let contents = try? String(contentsOf: registryFile, encoding: .utf8) else {
@@ -310,95 +325,8 @@ nonisolated enum WineManager {
             )
         }
 
-        // Verify the DLLs are real Microsoft binaries (not Wine stubs).
-        // If the installer failed silently, extract DLLs from the redist using cabextract.
-        let sys32 = info.prefixPath.appendingPathComponent("drive_c/windows/system32")
-        let vcrt = sys32.appendingPathComponent("vcruntime140.dll").path
-        let attrs = try? fm.attributesOfItem(atPath: vcrt)
-        let size = (attrs?[.size] as? UInt64) ?? 0
-
-        if size < 100_000 {
-            // DLLs are Wine stubs — extract real ones from the downloaded redistributable
-            try await extractVCRuntimeDLLs(
-                from: downloadsPath.appendingPathComponent("vc_redist.x64.exe"),
-                to: sys32
-            )
-            // Also extract x86 DLLs to syswow64
-            let syswow64 = info.prefixPath.appendingPathComponent("drive_c/windows/syswow64")
-            try fm.createDirectory(at: syswow64, withIntermediateDirectories: true)
-            try await extractVCRuntimeDLLs(
-                from: downloadsPath.appendingPathComponent("vc_redist.x86.exe"),
-                to: syswow64
-            )
-        }
-
         // Set complete registry keys for UE4 prerequisite check
         try await registerVCRuntime(info: info)
-    }
-
-    /// Extract VC++ DLLs from the redistributable using cabextract/expand.
-    private static func extractVCRuntimeDLLs(from redistPath: URL, to destDir: URL) async throws {
-        let fm = FileManager.default
-        let tempDir = fm.temporaryDirectory.appendingPathComponent("vcredist_\(UUID().uuidString)")
-        try fm.createDirectory(at: tempDir, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: tempDir) }
-
-        // The VC++ redist .exe is a self-extracting archive; extract with 7z or expand
-        // Try expand (macOS built-in) first, then fall back to copying from a known source
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-        process.arguments = ["7z", "x", "-o\(tempDir.path)", redistPath.path]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        let ran7z = (try? process.run()).map { process.waitUntilExit(); return process.terminationStatus == 0 } ?? false
-
-        if ran7z {
-            // Find and extract .cab files that contain the DLLs
-            if let cabFiles = try? fm.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil) {
-                for cab in cabFiles where cab.pathExtension == "cab" {
-                    let cabProcess = Process()
-                    cabProcess.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-                    cabProcess.arguments = ["7z", "x", "-o\(tempDir.path)/dlls", cab.path]
-                    cabProcess.standardOutput = FileHandle.nullDevice
-                    cabProcess.standardError = FileHandle.nullDevice
-                    try? cabProcess.run()
-                    cabProcess.waitUntilExit()
-                }
-            }
-
-            // Copy extracted DLLs to destination
-            let dllNames = [
-                "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll",
-                "concrt140.dll", "ucrtbase.dll", "vcomp140.dll",
-                "msvcp140_1.dll", "msvcp140_2.dll", "mfc140u.dll",
-                "vccorlib140.dll", "vcruntime140_threads.dll",
-            ]
-            let searchDirs = [tempDir, tempDir.appendingPathComponent("dlls")]
-            for dllName in dllNames {
-                for searchDir in searchDirs {
-                    if let found = findFile(named: dllName, in: searchDir) {
-                        let dest = destDir.appendingPathComponent(dllName)
-                        try? fm.removeItem(at: dest)
-                        try? fm.copyItem(at: found, to: dest)
-                        break
-                    }
-                }
-            }
-        }
-    }
-
-    /// Recursively find a file by name in a directory.
-    private static func findFile(named name: String, in directory: URL) -> URL? {
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: directory, includingPropertiesForKeys: nil) else {
-            return nil
-        }
-        for case let fileURL as URL in enumerator {
-            if fileURL.lastPathComponent.lowercased() == name.lowercased() {
-                return fileURL
-            }
-        }
-        return nil
     }
 
     /// Set all registry keys that UE4 checks for VC++ runtime presence.

@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import os
 
 struct DownloadProgress: Sendable {
     let bytesDownloaded: Int64
@@ -13,14 +14,31 @@ struct DownloadProgress: Sendable {
     }
 }
 
+// MARK: - Shared Formatting
+
+func formatSize(_ bytes: UInt64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        return String(format: "%.2f GB", Double(bytes) / (1024 * 1024 * 1024))
+    } else if bytes >= 1024 * 1024 {
+        return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
+    } else if bytes >= 1024 {
+        return String(format: "%.0f KB", Double(bytes) / 1024)
+    }
+    return "\(bytes) B"
+}
+
 // MARK: - URLSession Download Delegate (reports per-chunk progress)
 
 private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
     private let onBytesWritten: @Sendable (Int64) -> Void
     private let onComplete: @Sendable (Result<(URL, URLResponse), Error>) -> Void
-    private var didResume = false
-    private var lastReportedBytes: Int64 = 0
+    private let lock = OSAllocatedUnfairLock(initialState: State())
     weak var session: URLSession?
+
+    private struct State {
+        var didResume = false
+        var lastReportedBytes: Int64 = 0
+    }
 
     init(
         onBytesWritten: @escaping @Sendable (Int64) -> Void,
@@ -28,6 +46,14 @@ private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
     ) {
         self.onBytesWritten = onBytesWritten
         self.onComplete = onComplete
+    }
+
+    private func tryResume() -> Bool {
+        lock.withLock { state in
+            if state.didResume { return false }
+            state.didResume = true
+            return true
+        }
     }
 
     func urlSession(
@@ -38,9 +64,14 @@ private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
         totalBytesExpectedToWrite: Int64
     ) {
         // Throttle: report every 256 KB to avoid flooding the actor
-        guard totalBytesWritten - lastReportedBytes >= 262_144 else { return }
-        lastReportedBytes = totalBytesWritten
-        onBytesWritten(totalBytesWritten)
+        let shouldReport = lock.withLock { state -> Bool in
+            guard totalBytesWritten - state.lastReportedBytes >= 262_144 else { return false }
+            state.lastReportedBytes = totalBytesWritten
+            return true
+        }
+        if shouldReport {
+            onBytesWritten(totalBytesWritten)
+        }
     }
 
     func urlSession(
@@ -53,13 +84,11 @@ private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
             .appendingPathComponent(UUID().uuidString)
         do {
             try FileManager.default.copyItem(at: location, to: tempFile)
-            guard !didResume else { return }
-            didResume = true
+            guard tryResume() else { return }
             let response = downloadTask.response ?? URLResponse()
             onComplete(.success((tempFile, response)))
         } catch {
-            guard !didResume else { return }
-            didResume = true
+            guard tryResume() else { return }
             onComplete(.failure(error))
         }
     }
@@ -67,8 +96,7 @@ private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         self.session?.finishTasksAndInvalidate()
         if let error = error {
-            guard !didResume else { return }
-            didResume = true
+            guard tryResume() else { return }
             onComplete(.failure(error))
         }
     }
@@ -112,7 +140,7 @@ actor DownloadManager {
         filesCompleted = 0
 
         sendProgress()
-        onLog("Starting download: \(files.count) files, \(Self.formatSize(manifest.totalSize))", .info)
+        onLog("Starting download: \(files.count) files, \(formatSize(manifest.totalSize))", .info)
         onLog("Install directory: \(installDirectory.path)", .info)
 
         // Sort files smallest first so small files complete quickly
@@ -130,10 +158,12 @@ actor DownloadManager {
             }
 
             for try await _ in group {
+                try Task.checkCancellation()
                 if index < sortedFiles.count {
                     let file = sortedFiles[index]
                     index += 1
                     group.addTask {
+                        try Task.checkCancellation()
                         try await self.downloadFile(file: file, version: version, to: installDirectory)
                     }
                 }
@@ -156,7 +186,7 @@ actor DownloadManager {
            let attrs = try? fm.attributesOfItem(atPath: destURL.path),
            let existingSize = attrs[.size] as? UInt64,
            existingSize == file.size {
-            onLog("SKIP (exists): \(file.path) (\(Self.formatSize(file.size)))", .info)
+            onLog("SKIP (exists): \(file.path) (\(formatSize(file.size)))", .info)
             downloadedBytes += Int64(file.size)
             filesCompleted += 1
             currentFile = file.path
@@ -172,7 +202,7 @@ actor DownloadManager {
 
         currentFile = file.path
         sendProgress()
-        onLog("DOWNLOADING: \(file.path) (\(Self.formatSize(file.size))) from \(url.absoluteString)", .info)
+        onLog("DOWNLOADING: \(file.path) (\(formatSize(file.size))) from \(url.absoluteString)", .info)
 
         // Download with real-time progress tracking
         let filePath = file.path
@@ -183,7 +213,7 @@ actor DownloadManager {
         // Clear in-flight tracking for this file
         inFlightBytes.removeValue(forKey: file.path)
 
-        if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
+        if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
             try? fm.removeItem(at: tempURL)
             onLog("HTTP ERROR \(httpResponse.statusCode): \(file.path)", .error)
             throw PaliumError.downloadFailed(
@@ -202,7 +232,7 @@ actor DownloadManager {
         if let attrs = try? fm.attributesOfItem(atPath: destURL.path),
            let downloadedSize = attrs[.size] as? UInt64 {
             if downloadedSize != file.size {
-                onLog("SIZE ERROR: \(file.path) — got \(Self.formatSize(downloadedSize)), expected \(Self.formatSize(file.size))", .error)
+                onLog("SIZE ERROR: \(file.path) — got \(formatSize(downloadedSize)), expected \(formatSize(file.size))", .error)
                 try? fm.removeItem(at: destURL)
                 throw PaliumError.downloadFailed(path: file.path, reason: "Size mismatch after download")
             }
@@ -223,7 +253,7 @@ actor DownloadManager {
             try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destURL.path)
         }
 
-        onLog("DONE: \(file.path) (\(Self.formatSize(file.size)))", .success)
+        onLog("DONE: \(file.path) (\(formatSize(file.size)))", .success)
         downloadedBytes += Int64(file.size)
         filesCompleted += 1
         currentFile = file.path
@@ -288,10 +318,16 @@ actor DownloadManager {
         inFlightBytes = [:]
 
         onLog("Starting verification of \(manifest.files.count) files in \(installDirectory.path)", .info)
-        onLog("Expected total size: \(Self.formatSize(manifest.totalSize))", .info)
+        onLog("Expected total size: \(formatSize(manifest.totalSize))", .info)
 
         let results = await withTaskGroup(of: VerifyResult.self, returning: [VerifyResult].self) { group in
-            for file in manifest.files {
+            let files = manifest.files
+            var index = 0
+
+            // Throttle: verify up to maxConcurrent files at a time
+            for _ in 0..<min(Self.maxConcurrent, files.count) {
+                let file = files[index]
+                index += 1
                 group.addTask {
                     Self.verifyOneFile(file: file, installDirectory: installDirectory)
                 }
@@ -302,6 +338,13 @@ actor DownloadManager {
             for await result in group {
                 collected.append(result)
                 self.incrementVerifyProgress(result: result)
+                if index < files.count {
+                    let file = files[index]
+                    index += 1
+                    group.addTask {
+                        Self.verifyOneFile(file: file, installDirectory: installDirectory)
+                    }
+                }
             }
             return collected
         }
@@ -319,12 +362,12 @@ actor DownloadManager {
         for result in sorted {
             switch result {
             case .ok(let file, let size):
-                onLog("OK: \(file.path) (\(Self.formatSize(size)))", .success)
+                onLog("OK: \(file.path) (\(formatSize(size)))", .success)
             case .missing(let file):
-                onLog("MISSING: \(file.path) (expected \(Self.formatSize(file.size)))", .error)
+                onLog("MISSING: \(file.path) (expected \(formatSize(file.size)))", .error)
                 corruptFiles.append(file)
             case .sizeMismatch(let file, let localSize):
-                onLog("SIZE MISMATCH: \(file.path) — local: \(Self.formatSize(localSize)), expected: \(Self.formatSize(file.size)) (diff: \(Self.formatSizeDiff(local: localSize, expected: file.size)))", .warning)
+                onLog("SIZE MISMATCH: \(file.path) — local: \(formatSize(localSize)), expected: \(formatSize(file.size)) (diff: \(Self.formatSizeDiff(local: localSize, expected: file.size)))", .warning)
                 corruptFiles.append(file)
             case .unreadable(let file):
                 onLog("UNREADABLE: \(file.path) — cannot read file attributes", .error)
@@ -336,7 +379,7 @@ actor DownloadManager {
             onLog("Verification complete: all \(manifest.files.count) files OK", .success)
         } else {
             let repairSize = corruptFiles.reduce(UInt64(0)) { $0 + $1.size }
-            onLog("Verification complete: \(corruptFiles.count) file(s) need repair (\(Self.formatSize(repairSize)) to download)", .warning)
+            onLog("Verification complete: \(corruptFiles.count) file(s) need repair (\(formatSize(repairSize)) to download)", .warning)
         }
 
         return corruptFiles
@@ -374,17 +417,6 @@ actor DownloadManager {
         sendProgress()
     }
 
-    static func formatSize(_ bytes: UInt64) -> String {
-        if bytes >= 1024 * 1024 * 1024 {
-            return String(format: "%.2f GB", Double(bytes) / (1024 * 1024 * 1024))
-        } else if bytes >= 1024 * 1024 {
-            return String(format: "%.1f MB", Double(bytes) / (1024 * 1024))
-        } else if bytes >= 1024 {
-            return String(format: "%.0f KB", Double(bytes) / 1024)
-        }
-        return "\(bytes) B"
-    }
-
     private static func formatSizeDiff(local: UInt64, expected: UInt64) -> String {
         if local < expected {
             return "-\(formatSize(expected - local)) short"
@@ -404,7 +436,7 @@ actor DownloadManager {
         filesTotal = files.count
         filesCompleted = 0
 
-        onLog("Repairing \(files.count) files (\(Self.formatSize(UInt64(totalBytes))))", .info)
+        onLog("Repairing \(files.count) files (\(formatSize(UInt64(totalBytes))))", .info)
         sendProgress()
 
         let sortedFiles = files.sorted { $0.size < $1.size }
