@@ -1,6 +1,8 @@
 import Foundation
 
 enum PaliumError: LocalizedError, Sendable, Equatable {
+    static let gptkReleasePage = "https://github.com/Gcenx/game-porting-toolkit/releases"
+
     case wineNotFound
     case noBottleFound
     case gameNotInstalled
@@ -10,6 +12,7 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
     case launchFailed(String)
     case cdnError(String)
     case prefixInitFailed(String)
+    
 
     var isWineNotFound: Bool {
         if case .wineNotFound = self { return true }
@@ -19,7 +22,7 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .wineNotFound:
-            return "Wine not found. Install Game Porting Toolkit via Homebrew:\nbrew tap Gcenx/homebrew-wine && brew install --cask game-porting-toolkit"
+            return "Wine not found. Install Game Porting Toolkit 2+ from \(Self.gptkReleasePage)"
         case .noBottleFound:
             return "No Wine prefix found. The app will create one automatically — please retry"
         case .gameNotInstalled:

@@ -280,8 +280,11 @@ actor DownloadManager {
                     continuation.resume(with: result)
                 }
             )
+            let config = URLSessionConfiguration.default
+            config.timeoutIntervalForRequest = 300 // 5 min per request
+            config.timeoutIntervalForResource = 3600 // 1 hour total per file
             let session = URLSession(
-                configuration: .default,
+                configuration: config,
                 delegate: delegate,
                 delegateQueue: nil
             )

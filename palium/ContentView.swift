@@ -4,6 +4,8 @@ struct ContentView: View {
     @State private var appState = AppState()
     @State private var showGPTKInstallAlert = false
     @State private var downloadTask: Task<Void, Never>?
+    @Environment(\.openURL) private var openURL
+
 
     var body: some View {
         VStack(spacing: 0) {
@@ -80,19 +82,17 @@ struct ContentView: View {
             await checkRequirements()
         }
         .alert("Game Porting Toolkit Not Installed", isPresented: $showGPTKInstallAlert) {
-            Button("Copy Command") {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(
-                    "brew tap Gcenx/homebrew-wine && brew install --cask game-porting-toolkit",
-                    forType: .string
-                )
+            Button("Download") {
+                if let url = URL(string: PaliumError.gptkReleasePage) {
+                                openURL(url)
+                            }
             }
             Button("Retry") {
                 Task { await checkRequirements() }
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Game Porting Toolkit is required to run Palia on macOS.\n\nInstall via Homebrew:\nbrew tap Gcenx/homebrew-wine\nbrew install --cask game-porting-toolkit\n\nAfter installing, click Retry.")
+            Text("Game Porting Toolkit is required to run Palia on macOS.\n\nDownload GPTK from \(PaliumError.gptkReleasePage) and move it to Applications directory.\n\nAfter installing, click Retry.")
         }
     }
 

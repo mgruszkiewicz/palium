@@ -9,11 +9,17 @@ nonisolated enum GameLauncher {
 
     static func launch(info: WineInfo, options: LaunchOptions) throws -> Process {
         let wineUser = info.wineUsername
-        let gameWindowsPath = "C:\\users\\\(wineUser)\\AppData\\Local\\Palia\\Client\\PaliaClient.exe"
 
-        // Verify the game exists on the macOS filesystem
-        let gameExePath = info.gameInstallPath.appendingPathComponent("PaliaClient.exe")
-        guard FileManager.default.fileExists(atPath: gameExePath.path) else {
+        // Launch the actual game binary directly, NOT PaliaClient.exe (which is a
+        // launcher stub that runs a VC++ prerequisite check via UEPrereqSetup).
+        // The prerequisite check fails under GPTK because the WiX Burn bootstrapper
+        // can't load kernel32.dll. Bypassing the stub avoids the dialog entirely.
+        let gameWindowsPath = "C:\\users\\\(wineUser)\\AppData\\Local\\Palia\\Client\\Palia\\Binaries\\Win64\\PaliaClient-Win64-Shipping.exe"
+
+        // Verify the game binary exists on the macOS filesystem
+        let gameBinaryPath = info.gameInstallPath
+            .appendingPathComponent("Palia/Binaries/Win64/PaliaClient-Win64-Shipping.exe")
+        guard FileManager.default.fileExists(atPath: gameBinaryPath.path) else {
             throw PaliumError.gameNotInstalled
         }
 

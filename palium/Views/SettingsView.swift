@@ -19,8 +19,13 @@ struct SettingsView: View {
                 .tabItem {
                     Label("Performance", systemImage: "gauge.with.dots.needle.67percent")
                 }
+
+            TroubleshootingTab()
+                .tabItem {
+                    Label("Troubleshoot", systemImage: "wrench.and.screwdriver")
+                }
         }
-        .frame(width: 450, height: 280)
+        .frame(width: 500, height: 380)
     }
 
     // MARK: - Wine Tab
