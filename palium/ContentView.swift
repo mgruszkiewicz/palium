@@ -300,7 +300,7 @@ struct ContentView: View {
             Text("Ready to Play")
                 .font(.headline)
 
-            Button("Launch Palia") {
+            Button("Launch Game") {
                 launchGame()
             }
             .buttonStyle(.borderedProminent)

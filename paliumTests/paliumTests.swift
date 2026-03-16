@@ -404,6 +404,11 @@ struct WineManagerTests {
         #expect(overrides.contains("d3d11"))
         #expect(overrides.contains("d3d9"))
         #expect(overrides.contains("d3d10core"))
+        #expect(overrides.contains("msvcp140"))
+        #expect(overrides.contains("vcruntime140"))
+        #expect(overrides.contains("vcomp140"))
+        #expect(overrides.contains("mfc140u"))
+        #expect(overrides.contains("vccorlib140"))
         #expect(overrides.contains("n,b"))
     }
 

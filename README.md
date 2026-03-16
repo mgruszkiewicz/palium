@@ -14,9 +14,16 @@ A native macOS launcher for [Palia](https://palia.com), built with Swift and Swi
 ## Requirements
 
 - macOS 14+ (Sonoma) on Apple Silicon
-- A Wine environment — one of:
-  - **Game Porting Toolkit** (recommended): download from [Gcenx/game-porting-toolkit releases](https://github.com/Gcenx/game-porting-toolkit/releases) and place in `/Applications/`
-  - **Whisky**: install from [getwhisky.app](https://getwhisky.app)
+- **Game Porting Toolkit** (recommended): download from [Gcenx/game-porting-toolkit releases](https://github.com/Gcenx/game-porting-toolkit/releases) and place in `/Applications/`
+
+## How to setup?
+1. Download the latest release from [Release page](https://github.com/mgruszkiewicz/palium/releases)
+2. Make sure that you have Game Porting Toolkit installed in Application directory. If not, please download the .tar.xz file from [Gcenx/game-porting-toolkit releases](https://github.com/Gcenx/game-porting-toolkit/releases) and extract the application to Application directory.
+3. Launch the Palium launcher. Wait for initial setup to finish, the launcher will check for updates. Click on "Download Palia", and wait for game to install.
+
+## Troubleshooting
+If you have problem with game launch, you can open a Settings page (the gear icon in right top corner, or press `⌘+,`) -> Troubleshooting tab -> Run Diagnostics to validate that the environment was setup correctly. 
+You can also ran "Verify & Repair Files" below the "Launch Game" button to validate downloaded file/resume interrputed download.
 
 ## Building
 
@@ -31,28 +38,6 @@ The app is **not sandboxed** (required for Wine JIT and process launching). Enti
 - `com.apple.security.cs.disable-library-validation`
 - `com.apple.security.network.client`
 
-## Architecture
-
-```
-palium/
-├── paliumApp.swift              App entry point, window + settings scene
-├── ContentView.swift            Main launcher UI (state-machine driven)
-├── Models/
-│   ├── AppState.swift           @Observable app state (phase, progress, logs)
-│   ├── LaunchSettings.swift     Persisted settings singleton (UserDefaults)
-│   ├── WineInfo.swift           Wine environment info (binary, prefix, username)
-│   ├── ManifestModels.swift     CDN manifest data types
-│   └── PaliumError.swift        Typed error enum
-├── Services/
-│   ├── WineManager.swift        Wine/GPTK/Whisky detection, prefix init, VC++ install
-│   ├── CDNClient.swift          Palia CDN API (version, manifest, file URLs)
-│   ├── FlexBuffersParser.swift  FlexBuffers binary decoder (for CDN manifests)
-│   ├── DownloadManager.swift    Concurrent streaming downloader with hash verification
-│   └── GameLauncher.swift       Wine process launcher with DX11/DX12/UE4 flags
-└── Views/
-    ├── SettingsView.swift       Tabbed settings (Wine, Graphics, Performance)
-    └── SpeedGraphView.swift     Sparkline area chart for download speed
-```
 
 ## How it works
 
