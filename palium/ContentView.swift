@@ -32,6 +32,9 @@ struct ContentView: View {
                 case .needsDownload:
                     downloadPromptView
 
+                case .needsUpdate:
+                    updatePromptView
+
                 case .downloading:
                     downloadingView
 
@@ -79,6 +82,7 @@ struct ContentView: View {
             }
         }
         .task {
+            if applyUITestOverrides() { return }
             await checkRequirements()
         }
         .alert("Game Porting Toolkit Not Installed", isPresented: $showGPTKInstallAlert) {
@@ -218,6 +222,39 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
+        }
+    }
+
+    private var updatePromptView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "arrow.triangle.2.circlepath")
+                .font(.system(size: 40))
+                .foregroundStyle(.orange)
+
+            Text("Update Available")
+                .font(.headline)
+
+            Text("v\(appState.localGameVersion) → v\(appState.gameVersion)")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            if let manifest = appState.manifest {
+                Text("\(manifest.files.count) files — only changed files will be downloaded")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
+            Button("Update Game") {
+                startDownload()
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            Button("Launch Anyway") {
+                launchGame()
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
         }
     }
 
@@ -434,7 +471,23 @@ struct ContentView: View {
         // Check if game is already installed
         if let info = appState.wineInfo, WineManager.isGameInstalled(info: info) {
             appState.log("Game found at \(info.gameInstallPath.path)", level: .success)
-            appState.phase = .ready
+
+            let localVersion = LaunchSettings.shared.installedVersion
+            if let localVersion {
+                appState.localGameVersion = localVersion
+                appState.log("Installed version: \(localVersion)", level: .info)
+
+                if localVersion != appState.gameVersion {
+                    appState.log("Update available: \(localVersion) → \(appState.gameVersion)", level: .warning)
+                    appState.phase = .needsUpdate
+                } else {
+                    appState.phase = .ready
+                }
+            } else {
+                appState.log("No stored version found — assuming up to date", level: .warning)
+                LaunchSettings.shared.installedVersion = appState.gameVersion
+                appState.phase = .ready
+            }
         } else {
             appState.log("Game not installed — download required", level: .warning)
             appState.phase = .needsDownload
@@ -443,6 +496,13 @@ struct ContentView: View {
 
     private func startDownload() {
         guard let manifest = appState.manifest, let info = appState.wineInfo else { return }
+
+        let isUpdate: Bool
+        if case .needsUpdate = appState.phase {
+            isUpdate = true
+        } else {
+            isUpdate = !appState.localGameVersion.isEmpty
+        }
 
         appState.phase = .downloading
         appState.showDebugLog = true
@@ -458,10 +518,11 @@ struct ContentView: View {
                     version: appState.gameVersion,
                     installDirectory: info.gameInstallPath
                 )
+                LaunchSettings.shared.installedVersion = appState.gameVersion
                 appState.phase = .ready
             } catch is CancellationError {
                 appState.log("Download cancelled", level: .warning)
-                appState.phase = .needsDownload
+                appState.phase = isUpdate ? .needsUpdate : .needsDownload
             } catch let error as PaliumError {
                 appState.log("Download failed: \(error.localizedDescription)", level: .error)
                 appState.phase = .error(error)
@@ -581,6 +642,43 @@ struct ContentView: View {
                 }
             }
         )
+    }
+
+    // MARK: - UI Testing
+
+    /// Checks for `--ui-test-phase` launch argument and sets mock state. Returns `true` if overrides were applied.
+    private func applyUITestOverrides() -> Bool {
+        let args = ProcessInfo.processInfo.arguments
+        guard let phaseIndex = args.firstIndex(of: "--ui-test-phase"),
+              phaseIndex + 1 < args.count else {
+            return false
+        }
+        let phase = args[phaseIndex + 1]
+
+        // Read optional version arguments
+        func arg(named name: String) -> String? {
+            guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
+            return args[i + 1]
+        }
+
+        let cdnVersion = arg(named: "--ui-test-cdn-version") ?? "0.201.0"
+        let localVersion = arg(named: "--ui-test-local-version") ?? "0.200.0"
+
+        appState.gameVersion = cdnVersion
+
+        switch phase {
+        case "needsUpdate":
+            appState.localGameVersion = localVersion
+            appState.phase = .needsUpdate
+        case "needsDownload":
+            appState.phase = .needsDownload
+        case "ready":
+            appState.phase = .ready
+        default:
+            return false
+        }
+
+        return true
     }
 
     // MARK: - Helpers

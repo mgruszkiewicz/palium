@@ -21,6 +21,9 @@ class LaunchSettings {
     // Performance
     var useAllCores: Bool = true { didSet { save() } }
 
+    // Installed game version (persisted to detect updates)
+    var installedVersion: String? { didSet { save() } }
+
     private static let storageKey = "launchSettings_v2"
 
     private init() {
@@ -31,6 +34,7 @@ class LaunchSettings {
         var wineSource: WineSource = .auto
         var metalHUD: Bool = false
         var useAllCores: Bool = true
+        var installedVersion: String?
     }
 
     private func load() {
@@ -41,13 +45,15 @@ class LaunchSettings {
         wineSource = stored.wineSource
         metalHUD = stored.metalHUD
         useAllCores = stored.useAllCores
+        installedVersion = stored.installedVersion
     }
 
     private func save() {
         let stored = StoredSettings(
             wineSource: wineSource,
             metalHUD: metalHUD,
-            useAllCores: useAllCores
+            useAllCores: useAllCores,
+            installedVersion: installedVersion
         )
         if let data = try? JSONEncoder().encode(stored) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)

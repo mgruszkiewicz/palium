@@ -20,6 +20,7 @@ class AppState {
         case checking
         case needsSetup(PaliumError)
         case needsDownload
+        case needsUpdate
         case downloading
         case verifying
         case repairing
@@ -54,6 +55,7 @@ class AppState {
     var wineInfo: WineInfo?
     var manifest: UpdateManifest?
     var gameVersion: String = ""
+    var localGameVersion: String = ""
     var gameProcess: Process?
 
     var isRepairing: Bool {
