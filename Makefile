@@ -31,6 +31,15 @@ test:
 	xcodebuild -project $(PROJECT) \
 		-scheme $(SCHEME) \
 		-configuration Debug \
+		CODE_SIGN_IDENTITY=- \
+		-skip-testing:paliumUITests \
+		test
+
+test-all:
+	xcodebuild -project $(PROJECT) \
+		-scheme $(SCHEME) \
+		-configuration Debug \
+		CODE_SIGN_IDENTITY=- \
 		test
 
 clean:
