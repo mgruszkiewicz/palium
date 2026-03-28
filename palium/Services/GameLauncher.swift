@@ -5,9 +5,14 @@ nonisolated enum GameLauncher {
     struct LaunchOptions: Sendable {
         let metalHUD: Bool
         let useAllCores: Bool
+        let enableDXMTDebug: Bool
     }
 
-    static func launch(info: WineInfo, options: LaunchOptions) throws -> Process {
+    static func launch(
+        info: WineInfo,
+        options: LaunchOptions,
+        onLog: (@Sendable (String, LogEntry.Level) -> Void)? = nil
+    ) throws -> Process {
         let wineUser = info.wineUsername
 
         // Launch the actual game binary directly, NOT PaliaClient.exe (which is a
@@ -33,8 +38,34 @@ nonisolated enum GameLauncher {
         let process = Process()
         process.executableURL = info.wineBinaryURL
         process.arguments = arguments
-        process.environment = WineManager.makeWineEnvironment(info: info, metalHUD: options.metalHUD)
+        process.environment = WineManager.makeWineEnvironment(
+            info: info,
+            metalHUD: options.metalHUD,
+            enableDXMTDebug: options.enableDXMTDebug
+        )
         process.currentDirectoryURL = info.gameInstallPath
+
+        // When DXMT debug is enabled, capture Wine's stderr to surface DLL loading info
+        if options.enableDXMTDebug, let onLog {
+            let pipe = Pipe()
+            process.standardError = pipe
+
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                guard !data.isEmpty,
+                      let line = String(data: data, encoding: .utf8)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                      !line.isEmpty else { return }
+                // Filter to only DLL-related lines to avoid flooding the log
+                let lower = line.lowercased()
+                if lower.contains("loaddll") || lower.contains("module")
+                    || lower.contains("dxmt") || lower.contains("dxgi")
+                    || lower.contains("d3d11") || lower.contains("d3d10")
+                    || lower.contains("winemetal") || lower.contains("dllpath") {
+                    onLog("[Wine] \(line)", .info)
+                }
+            }
+        }
 
         try process.run()
         return process

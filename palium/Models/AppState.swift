@@ -19,6 +19,8 @@ class AppState {
     enum Phase: Sendable {
         case checking
         case needsSetup(PaliumError)
+        case needsWineSetup
+        case settingUpWine
         case needsDownload
         case needsUpdate
         case downloading
@@ -47,6 +49,9 @@ class AppState {
     private var _speedLastBytes: Int64 = 0
     private var _speedLastTime: Date = .now
 
+    // Wine setup progress
+    var setupStepDescription: String = ""
+
     // Debug log
     var showDebugLog: Bool = false
     var logEntries: [LogEntry] = []
@@ -65,10 +70,42 @@ class AppState {
 
     private static let maxLogEntries = 1000
 
+    /// Log file at ~/Library/Logs/palium/palium.log
+    static let logFileURL: URL = {
+        let logsDir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/palium")
+        try? FileManager.default.createDirectory(at: logsDir, withIntermediateDirectories: true)
+        return logsDir.appendingPathComponent("palium.log")
+    }()
+
+    private nonisolated static let dateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+        return f
+    }()
+
     func log(_ message: String, level: LogEntry.Level = .info) {
-        logEntries.append(LogEntry(level: level, message: message))
+        let entry = LogEntry(level: level, message: message)
+        logEntries.append(entry)
         if logEntries.count > Self.maxLogEntries {
             logEntries.removeFirst(logEntries.count - Self.maxLogEntries)
+        }
+
+        let prefix = switch level {
+        case .info: "INFO"
+        case .warning: "WARN"
+        case .error: "ERROR"
+        case .success: "OK"
+        }
+        let line = "[\(Self.dateFormatter.string(from: entry.timestamp))] [\(prefix)] \(message)\n"
+        if let data = line.data(using: .utf8) {
+            if let handle = try? FileHandle(forWritingTo: Self.logFileURL) {
+                handle.seekToEndOfFile()
+                handle.write(data)
+                handle.closeFile()
+            } else {
+                try? data.write(to: Self.logFileURL)
+            }
         }
     }
 

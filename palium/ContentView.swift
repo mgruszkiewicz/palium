@@ -29,6 +29,12 @@ struct ContentView: View {
                 case .needsSetup(let error):
                     setupView(error: error)
 
+                case .needsWineSetup:
+                    needsWineSetupView
+
+                case .settingUpWine:
+                    settingUpWineView
+
                 case .needsDownload:
                     downloadPromptView
 
@@ -200,6 +206,67 @@ struct ContentView: View {
         }
     }
 
+    private var needsWineSetupView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "arrow.down.app")
+                .font(.system(size: 40))
+                .foregroundStyle(.blue)
+
+            Text("Wine Environment Required")
+                .font(.headline)
+
+            Text("Palium needs to download Wine Staging + DXMT (~650 MB) to run Palia on macOS. This is a one-time setup.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 350)
+
+            Button("Set Up Wine") {
+                Task { await performWineSetup() }
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+
+            if WineManager.isGPTKInstalled {
+                Button("Use GPTK Instead") {
+                    LaunchSettings.shared.wineSource = .gptk
+                    Task { await checkRequirements() }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+        }
+    }
+
+    private var settingUpWineView: some View {
+        VStack(spacing: 12) {
+            ProgressView(value: appState.downloadProgress) {
+                Text("Setting up Wine environment...")
+            }
+
+            Text(appState.setupStepDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if appState.totalBytes > 0 {
+                HStack {
+                    Text("\(formatSize(UInt64(appState.downloadedBytes))) / \(formatSize(UInt64(appState.totalBytes)))")
+                    Spacer()
+                    if appState.downloadSpeed > 0 {
+                        Text(formatSpeed(appState.downloadSpeed))
+                    }
+                }
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            }
+
+            if appState.speedHistory.count >= 2 {
+                SpeedGraphView(samples: appState.speedHistory)
+                    .frame(height: 40)
+            }
+        }
+    }
+
     private var downloadPromptView: some View {
         VStack(spacing: 12) {
             Image(systemName: "arrow.down.circle")
@@ -352,7 +419,7 @@ struct ContentView: View {
             // Wine source info
             if let info = appState.wineInfo {
                 HStack(spacing: 4) {
-                    Image(systemName: info.source == .gptk ? "cup.and.saucer" : "wineglass")
+                    Image(systemName: info.source == .gptk ? "cup.and.saucer" : "globe.americas")
                         .font(.system(size: 9))
                     Text(info.source.rawValue)
                     Text("—")
@@ -402,10 +469,17 @@ struct ContentView: View {
         appState.statusMessage = "Checking system requirements..."
         appState.log("Checking system requirements...")
 
-        // Detect Wine environment (GPTK2 or Whisky)
+        // Check if Wine Staging setup is needed
+        let preferredSource = LaunchSettings.shared.wineSource
+        if preferredSource != .gptk && !WineSetupManager.isSetupComplete {
+            appState.phase = .needsWineSetup
+            return
+        }
+
+        // Detect Wine environment
         do {
             appState.statusMessage = "Detecting Wine environment..."
-            let info = try await WineManager.detect(preferredSource: LaunchSettings.shared.wineSource)
+            let info = try await WineManager.detect(preferredSource: preferredSource)
             appState.wineInfo = info
             appState.log("Wine detected via \(info.source.rawValue)", level: .success)
             appState.log("Wine binary: \(info.wineBinaryURL.path)", level: .info)
@@ -534,6 +608,36 @@ struct ContentView: View {
         }
     }
 
+    private func performWineSetup() async {
+        appState.phase = .settingUpWine
+        appState.showDebugLog = true
+        appState.resetSpeed()
+
+        do {
+            try await WineSetupManager.performSetup(
+                onProgress: { [appState] progress in
+                    Task { @MainActor in
+                        appState.setupStepDescription = progress.description
+                        appState.downloadedBytes = Int64(progress.bytesDownloaded)
+                        appState.totalBytes = Int64(progress.totalBytes)
+                        appState.downloadProgress = progress.fraction
+                        appState.updateSpeed(currentBytes: progress.bytesDownloaded)
+                    }
+                },
+                onLog: { [appState] message, level in
+                    Task { @MainActor in appState.log(message, level: level) }
+                }
+            )
+            appState.log("Wine Staging + DXMT setup complete", level: .success)
+        } catch {
+            appState.log("Wine setup failed: \(error.localizedDescription)", level: .error)
+            appState.phase = .error(.wineSetupFailed(error.localizedDescription))
+            return
+        }
+
+        await checkRequirements()
+    }
+
     private func cancelDownload() {
         downloadTask?.cancel()
         downloadTask = nil
@@ -546,11 +650,16 @@ struct ContentView: View {
         let settings = LaunchSettings.shared
         let options = GameLauncher.LaunchOptions(
             metalHUD: settings.metalHUD,
-            useAllCores: settings.useAllCores
+            useAllCores: settings.useAllCores,
+            enableDXMTDebug: settings.enableDXMTDebug
         )
-        appState.log("Launching game (DX11, Metal HUD: \(options.metalHUD ? "ON" : "OFF"))...")
+        appState.log("Launching game (DX11, Metal HUD: \(options.metalHUD ? "ON" : "OFF"), DXMT Debug: \(options.enableDXMTDebug ? "ON" : "OFF"))...")
         do {
-            let process = try GameLauncher.launch(info: info, options: options)
+            let process = try GameLauncher.launch(info: info, options: options) { message, level in
+                Task { @MainActor in
+                    appState.log(message, level: level)
+                }
+            }
             appState.gameProcess = process
             appState.phase = .launching
             appState.log("Game process started (PID: \(process.processIdentifier))", level: .success)

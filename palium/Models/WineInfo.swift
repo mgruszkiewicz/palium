@@ -8,7 +8,7 @@ nonisolated struct WineInfo: Sendable {
 
     enum Source: String, Sendable {
         case gptk = "GPTK"
-        case whisky = "Whisky"
+        case wineStaging = "Wine Staging"
     }
 
     var gameInstallPath: URL {

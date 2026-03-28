@@ -12,6 +12,9 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
     case launchFailed(String)
     case cdnError(String)
     case prefixInitFailed(String)
+    case rosettaRequired
+    case wineSetupFailed(String)
+    case extractionFailed(String)
     
 
     var isWineNotFound: Bool {
@@ -22,7 +25,7 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .wineNotFound:
-            return "Wine not found. Install Game Porting Toolkit 2+ from \(Self.gptkReleasePage)"
+            return "Wine not found. Palium can download Wine Staging automatically, or install GPTK from \(Self.gptkReleasePage)"
         case .noBottleFound:
             return "No Wine prefix found. The app will create one automatically — please retry"
         case .gameNotInstalled:
@@ -39,6 +42,12 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
             return "CDN error: \(message)"
         case .prefixInitFailed(let reason):
             return "Failed to initialize Wine prefix: \(reason)"
+        case .rosettaRequired:
+            return "Rosetta 2 is required for Wine Staging on Apple Silicon but could not be installed"
+        case .wineSetupFailed(let reason):
+            return "Wine setup failed: \(reason)"
+        case .extractionFailed(let reason):
+            return "Failed to extract archive: \(reason)"
         }
     }
 }

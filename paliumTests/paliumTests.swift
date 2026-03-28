@@ -287,7 +287,7 @@ struct WineInfoTests {
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/prefix"),
             wineUsername: "player",
-            source: .whisky
+            source: .wineStaging
         )
         #expect(info.gameSavedPath.path.contains("player"))
         #expect(info.gameSavedPath.path.hasSuffix("Palia/Saved"))
@@ -305,7 +305,7 @@ struct WineInfoTests {
 
     @Test func sourceRawValues() {
         #expect(WineInfo.Source.gptk.rawValue == "GPTK")
-        #expect(WineInfo.Source.whisky.rawValue == "Whisky")
+        #expect(WineInfo.Source.wineStaging.rawValue == "Wine Staging")
     }
 }
 
@@ -318,13 +318,13 @@ struct LaunchSettingsTests {
         #expect(cases.count == 3)
         #expect(cases.contains(.auto))
         #expect(cases.contains(.gptk))
-        #expect(cases.contains(.whisky))
+        #expect(cases.contains(.wineStaging))
     }
 
     @Test func wineSourceRawValues() {
         #expect(LaunchSettings.WineSource.auto.rawValue == "Automatic")
         #expect(LaunchSettings.WineSource.gptk.rawValue == "GPTK (Homebrew)")
-        #expect(LaunchSettings.WineSource.whisky.rawValue == "Whisky")
+        #expect(LaunchSettings.WineSource.wineStaging.rawValue == "Wine Staging + DXMT")
     }
 
     @Test func wineSourceCodable() throws {
@@ -340,7 +340,7 @@ struct LaunchSettingsTests {
 struct GameLauncherTests {
 
     @Test func launchOptionsDefaults() {
-        let options = GameLauncher.LaunchOptions(metalHUD: false, useAllCores: true)
+        let options = GameLauncher.LaunchOptions(metalHUD: false, useAllCores: true, enableDXMTDebug: false)
         #expect(options.metalHUD == false)
         #expect(options.useAllCores == true)
     }
@@ -352,7 +352,7 @@ struct GameLauncherTests {
             wineUsername: "test",
             source: .gptk
         )
-        let options = GameLauncher.LaunchOptions(metalHUD: false, useAllCores: false)
+        let options = GameLauncher.LaunchOptions(metalHUD: false, useAllCores: false, enableDXMTDebug: false)
         #expect(throws: PaliumError.self) {
             _ = try GameLauncher.launch(info: info, options: options)
         }

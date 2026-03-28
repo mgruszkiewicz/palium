@@ -203,7 +203,7 @@ struct TroubleshootingTab: View {
                 WineManager.DiagnosticResult(
                     name: "Wine Detection",
                     passed: false,
-                    detail: "No Wine environment found — install GPTK or Whisky first"
+                    detail: "No Wine environment found — set up Wine Staging or install GPTK first"
                 )
             ]
             isRunning = false
@@ -247,7 +247,7 @@ struct TroubleshootingTab: View {
         let prefix = home.appendingPathComponent("Library/Application Support/com.palium/prefix")
         try? FileManager.default.removeItem(at: prefix)
         // Also kill wineserver so it doesn't hold stale state
-        let binDir = (WineManager.findGPTKBinary() ?? WineManager.findWhiskyBinary())?.deletingLastPathComponent()
+        let binDir = WineManager.findWineBinary()?.deletingLastPathComponent()
         if let wineserver = binDir?.appendingPathComponent("wineserver") {
             let p = Process()
             p.executableURL = wineserver

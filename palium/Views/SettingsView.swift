@@ -63,23 +63,25 @@ struct SettingsView: View {
                     .font(.headline)
 
                 detectedInfoRow(
+                    label: "Wine Staging + DXMT",
+                    available: WineManager.isWineStagingInstalled && WineManager.isDXMTInstalled,
+                    path: wineStagingPath
+                )
+                detectedInfoRow(
                     label: "GPTK (Homebrew)",
                     available: WineManager.isGPTKInstalled,
                     path: gptkPath
                 )
-                detectedInfoRow(
-                    label: "Whisky",
-                    available: WineManager.isWhiskyInstalled,
-                    path: whiskyPath
-                )
             }
 
-            if !WineManager.isGPTKInstalled && !WineManager.isWhiskyInstalled {
+            if !WineManager.isWineStagingInstalled && !WineManager.isGPTKInstalled {
                 Divider()
                 VStack(alignment: .leading, spacing: 4) {
                     Label("No Wine environment found", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
-                    Text("Install via Homebrew:")
+                    Text("Palium will download Wine Staging + DXMT automatically on next launch.")
+                        .font(.caption)
+                    Text("Or install GPTK via Homebrew:")
                         .font(.caption)
                     HStack {
                         Text("brew install --cask game-porting-toolkit")
@@ -104,7 +106,7 @@ struct SettingsView: View {
     private func availabilityBadge(for source: LaunchSettings.WineSource) -> some View {
         let available: Bool = switch source {
         case .gptk: WineManager.isGPTKInstalled
-        case .whisky: WineManager.isWhiskyInstalled
+        case .wineStaging: WineManager.isWineStagingInstalled && WineManager.isDXMTInstalled
         case .auto: true
         }
 
@@ -142,31 +144,17 @@ struct SettingsView: View {
     }
 
     private var prefixPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        switch settings.wineSource {
-        case .whisky:
-            let bottlesDir = home.appendingPathComponent(
-                "Library/Containers/com.isaacmarovitz.Whisky/Bottles"
-            )
-            if let contents = try? FileManager.default.contentsOfDirectory(
-                at: bottlesDir, includingPropertiesForKeys: nil
-            ), let first = contents.first {
-                return first.path
-            }
-            return bottlesDir.path
-        case .gptk, .auto:
-            return home.appendingPathComponent(
-                "Library/Application Support/com.palium/prefix"
-            ).path
-        }
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/com.palium/prefix")
+            .path
     }
 
     private var gptkPath: String? {
         WineManager.findGPTKBinary()?.path
     }
 
-    private var whiskyPath: String? {
-        WineManager.findWhiskyBinary()?.path
+    private var wineStagingPath: String? {
+        WineManager.isWineStagingInstalled ? WineManager.wineStagingBinaryPath().path : nil
     }
 
     // MARK: - Graphics Tab
@@ -175,6 +163,13 @@ struct SettingsView: View {
         Form {
             Toggle("Metal Performance HUD", isOn: $settings.metalHUD)
             Text("Show an FPS counter and GPU usage overlay powered by Metal. Useful for monitoring performance.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            Toggle("DXMT Debug Logging", isOn: $settings.enableDXMTDebug)
+            Text("Log Wine DLL loading to verify DXMT translation layer is active. Check the debug log after launch for [Wine] entries showing d3d11.dll / dxgi.dll load paths.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

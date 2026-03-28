@@ -12,39 +12,92 @@ nonisolated enum WineManager {
         "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64",
     ]
 
-    // Whisky paths
-    private static let whiskyAppPath = "/Applications/Whisky.app"
-    private static let whiskyWineRelativePath = "Library/Application Support/com.isaacmarovitz.Whisky/Libraries/Wine/bin/wine64"
-    private static let whiskyBottlesRelativePath = "Library/Containers/com.isaacmarovitz.Whisky/Bottles"
+    // Wine Staging (standalone) paths
+    private static let appSupportRelativePath = "Library/Application Support/com.palium"
+    private static let wineStagingRelativePath = appSupportRelativePath + "/wine"
+    private static let dxmtRelativePath = appSupportRelativePath + "/dxmt"
+
+    // Wine Staging + DXMT versions (update these to ship new versions)
+    static let wineStagingVersion = "11.5"
+    static let dxmtVersion = "v0.74"
+
+    static let wineStagingDownloadURL = URL(string:
+        "https://github.com/Gcenx/macOS_Wine_builds/releases/download/\(wineStagingVersion)/wine-staging-\(wineStagingVersion)-osx64.tar.xz")!
+    static let dxmtDownloadURL = URL(string:
+        "https://github.com/3Shain/dxmt/releases/download/\(dxmtVersion)/dxmt-\(dxmtVersion)-builtin.tar.gz")!
+
+    // MARK: - Wine Staging Computed Paths
+
+    static func wineStagingBinaryPath() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(wineStagingRelativePath)
+            .appendingPathComponent("Wine Staging.app/Contents/Resources/wine/bin/wine")
+    }
+
+    static func wineStagingDir() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(wineStagingRelativePath)
+    }
+
+    static func dxmtDir() -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(dxmtRelativePath)
+    }
+
+    static var isWineStagingInstalled: Bool {
+        FileManager.default.fileExists(atPath: wineStagingBinaryPath().path)
+    }
+
+    static var isDXMTInstalled: Bool {
+        FileManager.default.fileExists(
+            atPath: dxmtDir().appendingPathComponent("x86_64-windows/d3d11.dll").path
+        )
+    }
+
+    // MARK: - Rosetta 2
+
+    static var needsRosetta: Bool {
+        #if arch(arm64)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    static func isRosettaAvailable() -> Bool {
+        FileManager.default.fileExists(atPath: "/Library/Apple/usr/libexec/oah/libRosettaRuntime")
+    }
+
+    static func installRosetta() async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/softwareupdate")
+        process.arguments = ["--install-rosetta", "--agree-to-license"]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw PaliumError.rosettaRequired
+        }
+    }
 
     // MARK: - Detection
 
     /// Detect a usable Wine environment, respecting the user's source preference.
     static func detect(preferredSource: LaunchSettings.WineSource = .auto) async throws -> WineInfo {
         switch preferredSource {
+        case .wineStaging:
+            return try await detectWineStaging()
         case .gptk:
             return try await detectGPTK()
-        case .whisky:
-            return try detectWhisky()
         case .auto:
+            if let result = try? await detectWineStaging() {
+                return result
+            }
             if let result = try? await detectGPTK() {
                 return result
             }
-            if let result = try? detectWhisky() {
-                return result
-            }
-            guard let wineBinary = findWineBinary() else {
-                throw PaliumError.wineNotFound
-            }
-            let gptkPrefix = gptkPrefixPath()
-            try await initializePrefix(wineBinary: wineBinary, at: gptkPrefix)
-            let username = try findWineUsername(in: gptkPrefix)
-            return WineInfo(
-                wineBinaryURL: wineBinary,
-                prefixPath: gptkPrefix,
-                wineUsername: username,
-                source: .gptk
-            )
+            throw PaliumError.wineNotFound
         }
     }
 
@@ -71,28 +124,35 @@ nonisolated enum WineManager {
         )
     }
 
-    private static func detectWhisky() throws -> WineInfo {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let whiskyWine = home.appendingPathComponent(whiskyWineRelativePath)
-        guard FileManager.default.fileExists(atPath: whiskyWine.path) else {
+    private static func detectWineStaging() async throws -> WineInfo {
+        let wineBinary = wineStagingBinaryPath()
+        guard FileManager.default.fileExists(atPath: wineBinary.path) else {
             throw PaliumError.wineNotFound
         }
-        guard let whiskyResult = findWhiskyBottle() else {
-            throw PaliumError.noBottleFound
+        let prefix = gptkPrefixPath() // Same prefix shared with GPTK
+        if isPrefixValid(prefix), let username = try? findWineUsername(in: prefix) {
+            return WineInfo(
+                wineBinaryURL: wineBinary,
+                prefixPath: prefix,
+                wineUsername: username,
+                source: .wineStaging
+            )
         }
+        try await initializePrefix(wineBinary: wineBinary, at: prefix)
+        let username = try findWineUsername(in: prefix)
         return WineInfo(
-            wineBinaryURL: whiskyWine,
-            prefixPath: whiskyResult.bottle,
-            wineUsername: whiskyResult.username,
-            source: .whisky
+            wineBinaryURL: wineBinary,
+            prefixPath: prefix,
+            wineUsername: username,
+            source: .wineStaging
         )
     }
 
     // MARK: - Wine Binary Detection
 
     static func findWineBinary() -> URL? {
+        if isWineStagingInstalled { return wineStagingBinaryPath() }
         if let gptk = findGPTKBinary() { return gptk }
-        if let whisky = findWhiskyBinary() { return whisky }
         return nil
     }
 
@@ -105,18 +165,8 @@ nonisolated enum WineManager {
         return nil
     }
 
-    static func findWhiskyBinary() -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let path = home.appendingPathComponent(whiskyWineRelativePath)
-        return FileManager.default.fileExists(atPath: path.path) ? path : nil
-    }
-
     static var isGPTKInstalled: Bool {
         gptkCandidatePaths.contains { FileManager.default.fileExists(atPath: $0) }
-    }
-
-    static var isWhiskyInstalled: Bool {
-        FileManager.default.fileExists(atPath: whiskyAppPath)
     }
 
     // MARK: - Prefix Management
@@ -140,30 +190,6 @@ nonisolated enum WineManager {
             prefix: prefix,
             arguments: ["wineboot", "--init"]
         )
-    }
-
-    // MARK: - Whisky Fallback
-
-    private static func findWhiskyBottle() -> (bottle: URL, username: String)? {
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
-        let bottlesDir = home.appendingPathComponent(whiskyBottlesRelativePath)
-
-        guard fm.fileExists(atPath: bottlesDir.path),
-              let contents = try? fm.contentsOfDirectory(at: bottlesDir, includingPropertiesForKeys: [.isDirectoryKey]) else {
-            return nil
-        }
-
-        for bottle in contents {
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: bottle.path, isDirectory: &isDir), isDir.boolValue else {
-                continue
-            }
-            if let username = try? findWineUsername(in: bottle) {
-                return (bottle, username)
-            }
-        }
-        return nil
     }
 
     // MARK: - Username Detection
@@ -194,18 +220,33 @@ nonisolated enum WineManager {
 
     // MARK: - Wine Process Helpers
 
-    static func makeWineEnvironment(info: WineInfo, metalHUD: Bool = false) -> [String: String] {
+    static func makeWineEnvironment(info: WineInfo, metalHUD: Bool = false, enableDXMTDebug: Bool = false) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
         env["WINEPREFIX"] = info.prefixPath.path
         env["WINEBOOT_HIDE_DIALOG"] = "1"
-        env["WINEDEBUG"] = "-all"
-        env["WINEDLLOVERRIDES"] = "dxgi,d3d9,d3d10core,d3d11,msvcp140,msvcp140_1,msvcp140_2,vcruntime140,vcruntime140_1,vcruntime140_threads,concrt140,ucrtbase,vcomp140,mfc140u,vccorlib140=n,b"
+        env["WINEDEBUG"] = enableDXMTDebug ? "+loaddll,+module" : "-all"
         env["WINEMSYNC"] = "1"
-        env["DXVK_ASYNC"] = "1"
-        env["DXVK_STATE_CACHE"] = "1"
 
         if metalHUD {
             env["MTL_HUD_ENABLED"] = "1"
+        }
+
+        switch info.source {
+        case .wineStaging:
+            // DXMT provides d3d11/dxgi as builtin Wine modules via WINEDLLPATH_PREPEND.
+            // winhttp/wininet needed for Vivox chat HTTP requests.
+            let vcDlls = "msvcp140,msvcp140_1,msvcp140_2,vcruntime140,vcruntime140_1,vcruntime140_threads,concrt140,ucrtbase,vcomp140,mfc140u,vccorlib140"
+            env["WINEDLLOVERRIDES"] = "\(vcDlls)=n,b;winhttp,wininet=n,b"
+            env["WINEDLLPATH_PREPEND"] = dxmtDir().path
+
+        case .gptk:
+            // GPTK has its own D3D translation built-in via libd3dshared.dylib.
+            // D3D DLLs must be "b" (builtin-only) so GPTK's builtins are used
+            // even if DXMT native DLLs exist in the shared prefix's system32.
+            let vcDlls = "msvcp140,msvcp140_1,msvcp140_2,vcruntime140,vcruntime140_1,vcruntime140_threads,concrt140,ucrtbase,vcomp140,mfc140u,vccorlib140"
+            env["WINEDLLOVERRIDES"] = "dxgi,d3d9,d3d10core,d3d11=b;\(vcDlls)=n,b"
+            env["DXVK_ASYNC"] = "1"
+            env["DXVK_STATE_CACHE"] = "1"
         }
 
         return env
