@@ -27,3 +27,5 @@ Carthage/
 # Other
 *.swp
 *.lock
+
+*.dmg

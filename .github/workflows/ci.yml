@@ -29,16 +29,16 @@ jobs:
       - name: Build (unsigned)
         run: make build-unsigned
 
-      - name: Package application bundle
-        run: ditto -c -k --keepParent build/DerivedData/Build/Products/Release/palium.app palium.app.zip
+      - name: Create DMG
+        run: npm install --global create-dmg@8.1.0 && make create-dmg
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: palium
-          path: palium.app.zip
+          name: Palium.dmg
+          path: Palium.dmg
 
       - name: Generate artifact attestation
         uses: actions/attest@v4
         with:
-          subject-path: palium.app.zip
+          subject-path: palium.dmg
