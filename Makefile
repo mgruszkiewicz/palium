@@ -42,6 +42,9 @@ test-all:
 		CODE_SIGN_IDENTITY=- \
 		test
 
+dmg:
+	create-dmg $(BUILD_DIR)/DerivedData/Build/Products/Release/palium.app --dmg-title=Palium --no-version-in-filename $(if $(CI),--no-code-sign)
+
 clean:
 	rm -rf $(BUILD_DIR)
 	xcodebuild -project $(PROJECT) -scheme $(SCHEME) clean
