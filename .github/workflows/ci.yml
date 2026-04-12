@@ -1,8 +1,13 @@
 name: Run tests and build application
 
+permissions:
+  id-token: write
+  contents: read
+  attestations: write
+
 on:
   push:
-    branches: [main]
+    branches: [main, "ci/artifact-attestation"]
   pull_request:
     branches: [main]
 
@@ -29,3 +34,8 @@ jobs:
         with:
           name: palium.app
           path: build/DerivedData/Build/Products/Release/palium.app
+
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-path: 'build/DerivedData/Build/Products/Release/palium.app'
