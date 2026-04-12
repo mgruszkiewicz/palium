@@ -30,7 +30,7 @@ jobs:
         run: make build-unsigned
 
       - name: Create DMG
-        run: npm install --global create-dmg@8.1.0 && make create-dmg
+        run: npm install --global create-dmg@8.1.0 && make dmg
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
