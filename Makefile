@@ -3,7 +3,7 @@ SCHEME     := palium
 CONFIG     := Release
 BUILD_DIR  := ./build
 ARCHIVE    := $(BUILD_DIR)/palium.xcarchive
-APP        := $(ARCHIVE)/Products/Applications/Palium.app
+APP        := $(ARCHIVE)/Products/Applications/palium.app
 ZIP        := $(BUILD_DIR)/palium.zip
 
 .PHONY: archive zip clean test build-unsigned
@@ -16,7 +16,7 @@ archive:
 		archive
 
 zip: archive
-	cd $(ARCHIVE)/Products/Applications && zip -r -y $(CURDIR)/$(ZIP) Palium.app
+	cd $(ARCHIVE)/Products/Applications && zip -r -y $(CURDIR)/$(ZIP) palium.app
 	@echo "\nReady for release: $(ZIP)"
 
 build-unsigned:
@@ -43,7 +43,7 @@ test-all:
 		test
 
 dmg:
-	create-dmg $(BUILD_DIR)/DerivedData/Build/Products/Release/Palium.app --dmg-title=Palium --no-version-in-filename $(if $(CI),--no-code-sign)
+	create-dmg $(BUILD_DIR)/DerivedData/Build/Products/Release/palium.app --dmg-title=Palium --no-version-in-filename $(if $(CI),--no-code-sign)
 
 clean:
 	rm -rf $(BUILD_DIR)
