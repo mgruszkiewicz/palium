@@ -29,13 +29,16 @@ jobs:
       - name: Build (unsigned)
         run: make build-unsigned
 
+      - name: Package application bundle
+        run: ditto -c -k --keepParent build/DerivedData/Build/Products/Release/palium.app palium.app.zip
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: palium.app
-          path: build/DerivedData/Build/Products/Release/palium.app
+          name: palium
+          path: palium.app.zip
 
       - name: Generate artifact attestation
         uses: actions/attest@v4
         with:
-          subject-path: 'build/DerivedData/Build/Products/Release/palium.app'
+          subject-path: palium.app.zip
