@@ -1,5 +1,7 @@
 # Palium
 
+![Screenshot showing Palia game running on a MacOS, with Palium launcher on top of it and with METAL HUD enabled](https://i.issei.space/x8IaBwFH.jpg)
+
 A native macOS launcher for [Palia](https://palia.com), built with Swift and SwiftUI. Palium downloads, updates, and launches the Windows version of Palia on macOS using Wine and Apple's Game Porting Toolkit (GPTK).
 
 ## Features
@@ -11,15 +13,16 @@ A native macOS launcher for [Palia](https://palia.com), built with Swift and Swi
 - **Real-time progress** — download speed graph, per-file progress, and a debug log panel
 - **Settings window** — Wine source picker, graphics/performance toggles, open Wine prefix in Finder
 
+## How to setup?
+1. Download the latest release from [Release page](https://github.com/mgruszkiewicz/palium/releases).
+2. Make sure that you have Game Porting Toolkit installed in Application directory. If not, please download the latest release (.tar.xz file) from [Gcenx/game-porting-toolkit releases](https://github.com/Gcenx/game-porting-toolkit/releases) and extract the application to Application directory.
+3. Launch the Palium launcher. Wait for initial setup to finish, the launcher will check for updates. Click on "Download Palia", and wait for game to install.
+
 ## Requirements
 
 - macOS 14+ (Sonoma) on Apple Silicon
 - **Game Porting Toolkit** (recommended): download from [Gcenx/game-porting-toolkit releases](https://github.com/Gcenx/game-porting-toolkit/releases) and place in `/Applications/`
 
-## How to setup?
-1. Download the latest release from [Release page](https://github.com/mgruszkiewicz/palium/releases)
-2. Make sure that you have Game Porting Toolkit installed in Application directory. If not, please download the .tar.xz file from [Gcenx/game-porting-toolkit releases](https://github.com/Gcenx/game-porting-toolkit/releases) and extract the application to Application directory.
-3. Launch the Palium launcher. Wait for initial setup to finish, the launcher will check for updates. Click on "Download Palia", and wait for game to install.
 
 ## Troubleshooting
 If you have problem with game launch, you can open a Settings page (the gear icon in right top corner, or press `⌘+,`) -> Troubleshooting tab -> Run Diagnostics to validate that the environment was setup correctly. 
