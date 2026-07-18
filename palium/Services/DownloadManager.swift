@@ -16,7 +16,7 @@ struct DownloadProgress: Sendable {
 
 // MARK: - Shared Formatting
 
-func formatSize(_ bytes: UInt64) -> String {
+nonisolated func formatSize(_ bytes: UInt64) -> String {
     if bytes >= 1024 * 1024 * 1024 {
         return String(format: "%.2f GB", Double(bytes) / (1024 * 1024 * 1024))
     } else if bytes >= 1024 * 1024 {
@@ -27,32 +27,42 @@ func formatSize(_ bytes: UInt64) -> String {
     return "\(bytes) B"
 }
 
-// MARK: - URLSession Download Delegate (reports per-chunk progress)
+// MARK: - URLSession Delegate (one session, routes callbacks per task)
 
-private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-    private let onBytesWritten: @Sendable (Int64) -> Void
-    private let onComplete: @Sendable (Result<(URL, URLResponse), Error>) -> Void
-    private let lock = OSAllocatedUnfairLock(initialState: State())
-    weak var session: URLSession?
+private final class DownloadSessionDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+
+    struct Handler {
+        let onBytesWritten: @Sendable (Int64) -> Void
+        let onComplete: @Sendable (Result<(URL, URLResponse), Error>) -> Void
+    }
 
     private struct State {
-        var didResume = false
-        var lastReportedBytes: Int64 = 0
+        var handlers: [Int: Handler] = [:]
+        var lastReportedBytes: [Int: Int64] = [:]
+        /// Results for tasks that completed before register() ran — possible
+        /// when a task is cancelled immediately after creation.
+        var orphanResults: [Int: Result<(URL, URLResponse), Error>] = [:]
     }
 
-    init(
-        onBytesWritten: @escaping @Sendable (Int64) -> Void,
-        onComplete: @escaping @Sendable (Result<(URL, URLResponse), Error>) -> Void
-    ) {
-        self.onBytesWritten = onBytesWritten
-        self.onComplete = onComplete
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    func register(_ task: URLSessionTask, handler: Handler) {
+        let orphan = state.withLock { s -> Result<(URL, URLResponse), Error>? in
+            if let result = s.orphanResults.removeValue(forKey: task.taskIdentifier) {
+                return result
+            }
+            s.handlers[task.taskIdentifier] = handler
+            return nil
+        }
+        if let orphan {
+            handler.onComplete(orphan)
+        }
     }
 
-    private func tryResume() -> Bool {
-        lock.withLock { state in
-            if state.didResume { return false }
-            state.didResume = true
-            return true
+    private func takeHandler(for task: URLSessionTask) -> Handler? {
+        state.withLock { s in
+            s.lastReportedBytes[task.taskIdentifier] = nil
+            return s.handlers.removeValue(forKey: task.taskIdentifier)
         }
     }
 
@@ -63,15 +73,14 @@ private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
         totalBytesWritten: Int64,
         totalBytesExpectedToWrite: Int64
     ) {
-        // Throttle: report every 256 KB to avoid flooding the actor
-        let shouldReport = lock.withLock { state -> Bool in
-            guard totalBytesWritten - state.lastReportedBytes >= 262_144 else { return false }
-            state.lastReportedBytes = totalBytesWritten
-            return true
+        // Throttle: report every 256 KB per task to avoid flooding the actor
+        let handler = state.withLock { s -> Handler? in
+            let id = downloadTask.taskIdentifier
+            guard totalBytesWritten - (s.lastReportedBytes[id] ?? 0) >= 262_144 else { return nil }
+            s.lastReportedBytes[id] = totalBytesWritten
+            return s.handlers[id]
         }
-        if shouldReport {
-            onBytesWritten(totalBytesWritten)
-        }
+        handler?.onBytesWritten(totalBytesWritten)
     }
 
     func urlSession(
@@ -79,25 +88,26 @@ private final class FileDownloadDelegate: NSObject, URLSessionDownloadDelegate, 
         downloadTask: URLSessionDownloadTask,
         didFinishDownloadingTo location: URL
     ) {
-        // Copy file before the system deletes it when this method returns
+        // Move the file before the system deletes it when this method returns
         let tempFile = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString)
+        let result: Result<(URL, URLResponse), Error>
         do {
-            try FileManager.default.copyItem(at: location, to: tempFile)
-            guard tryResume() else { return }
-            let response = downloadTask.response ?? URLResponse()
-            onComplete(.success((tempFile, response)))
+            try FileManager.default.moveItem(at: location, to: tempFile)
+            result = .success((tempFile, downloadTask.response ?? URLResponse()))
         } catch {
-            guard tryResume() else { return }
-            onComplete(.failure(error))
+            result = .failure(error)
         }
+        takeHandler(for: downloadTask)?.onComplete(result)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        self.session?.finishTasksAndInvalidate()
-        if let error = error {
-            guard tryResume() else { return }
-            onComplete(.failure(error))
+        // Success is delivered in didFinishDownloadingTo; only errors arrive here.
+        guard let error else { return }
+        if let handler = takeHandler(for: task) {
+            handler.onComplete(.failure(error))
+        } else {
+            state.withLock { $0.orphanResults[task.taskIdentifier] = .failure(error) }
         }
     }
 }
@@ -116,8 +126,15 @@ actor DownloadManager {
     private let onProgress: @Sendable (DownloadProgress) -> Void
     private let onLog: @Sendable (String, LogEntry.Level) -> Void
 
-    private static let maxHashVerifySize: UInt64 = 2 * 1024 * 1024 * 1024 // 2 GB
     private static let maxConcurrent = 4
+
+    private static let sessionDelegate = DownloadSessionDelegate()
+    private static let session: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 300 // 5 min per request
+        config.timeoutIntervalForResource = 43200 // 12 hour total per file
+        return URLSession(configuration: config, delegate: sessionDelegate, delegateQueue: nil)
+    }()
 
     init(
         onProgress: @escaping @Sendable (DownloadProgress) -> Void,
@@ -143,6 +160,36 @@ actor DownloadManager {
         onLog("Starting download: \(files.count) files, \(formatSize(manifest.totalSize))", .info)
         onLog("Install directory: \(installDirectory.path)", .info)
 
+        try await downloadThrottled(files: files, version: version, installDirectory: installDirectory)
+
+        onLog("All downloads complete", .success)
+    }
+
+    func repairFiles(
+        files: [ManifestFile],
+        version: String,
+        installDirectory: URL
+    ) async throws {
+        totalBytes = files.reduce(0) { $0 + Int64($1.size) }
+        downloadedBytes = 0
+        inFlightBytes = [:]
+        filesTotal = files.count
+        filesCompleted = 0
+
+        onLog("Repairing \(files.count) files (\(formatSize(UInt64(totalBytes))))", .info)
+        sendProgress()
+
+        try await downloadThrottled(files: files, version: version, installDirectory: installDirectory)
+
+        onLog("Repair complete", .success)
+    }
+
+    /// Download files with at most `maxConcurrent` in flight at a time.
+    private func downloadThrottled(
+        files: [ManifestFile],
+        version: String,
+        installDirectory: URL
+    ) async throws {
         // Sort files smallest first so small files complete quickly
         let sortedFiles = files.sorted { $0.size < $1.size }
 
@@ -169,8 +216,6 @@ actor DownloadManager {
                 }
             }
         }
-
-        onLog("All downloads complete", .success)
     }
 
     private func downloadFile(
@@ -180,18 +225,29 @@ actor DownloadManager {
     ) async throws {
         let destURL = installDirectory.appendingPathComponent(file.path)
         let fm = FileManager.default
+        defer { inFlightBytes.removeValue(forKey: file.path) }
 
-        // Check if file already exists with correct size (skip re-download)
+        // Skip re-download only if both size and content hash match — a changed
+        // file of identical size (e.g. an in-place patch) must be re-fetched.
         if fm.fileExists(atPath: destURL.path),
            let attrs = try? fm.attributesOfItem(atPath: destURL.path),
            let existingSize = attrs[.size] as? UInt64,
            existingSize == file.size {
-            onLog("SKIP (exists): \(file.path) (\(formatSize(file.size)))", .info)
-            downloadedBytes += Int64(file.size)
-            filesCompleted += 1
-            currentFile = file.path
-            sendProgress()
-            return
+            let hashMatches: Bool
+            if file.hash.isEmpty {
+                hashMatches = true
+            } else {
+                hashMatches = (try? await Self.computeHash(at: destURL)) == file.hash
+            }
+            if hashMatches {
+                onLog("SKIP (up to date): \(file.path) (\(formatSize(file.size)))", .info)
+                downloadedBytes += Int64(file.size)
+                filesCompleted += 1
+                currentFile = file.path
+                sendProgress()
+                return
+            }
+            onLog("STALE (hash changed): \(file.path) — re-downloading", .warning)
         }
 
         // Create parent directories
@@ -206,12 +262,14 @@ actor DownloadManager {
 
         // Download with real-time progress tracking
         let filePath = file.path
-        let (tempURL, response) = try await Self.downloadWithProgress(from: url) { totalBytesWritten in
-            Task { await self.updateInFlightBytes(fileName: filePath, bytes: totalBytesWritten) }
+        let (tempURL, response): (URL, URLResponse)
+        do {
+            (tempURL, response) = try await Self.downloadWithProgress(from: url) { totalBytesWritten in
+                Task { await self.updateInFlightBytes(fileName: filePath, bytes: totalBytesWritten) }
+            }
+        } catch let error as URLError where error.code == .cancelled {
+            throw CancellationError()
         }
-
-        // Clear in-flight tracking for this file
-        inFlightBytes.removeValue(forKey: file.path)
 
         if let httpResponse = response as? HTTPURLResponse, !(200..<300).contains(httpResponse.statusCode) {
             try? fm.removeItem(at: tempURL)
@@ -238,9 +296,9 @@ actor DownloadManager {
             }
         }
 
-        // Verify hash for files under the size threshold
-        if file.size <= Self.maxHashVerifySize && !file.hash.isEmpty {
-            let actualHash = try Self.hashFile(at: destURL)
+        // Verify hash
+        if !file.hash.isEmpty {
+            let actualHash = try await Self.computeHash(at: destURL)
             if actualHash != file.hash {
                 onLog("HASH MISMATCH: \(file.path)", .error)
                 try? fm.removeItem(at: destURL)
@@ -260,11 +318,27 @@ actor DownloadManager {
         sendProgress()
     }
 
-    /// Hash a file using memory-mapped I/O.
+    // MARK: - Hashing
+
+    /// Hash a file in fixed-size chunks so large files never need to be
+    /// resident in memory all at once.
     private static nonisolated func hashFile(at url: URL) throws -> Data {
-        let mapped = try Data(contentsOf: url, options: .mappedIfSafe)
-        let digest = SHA256.hash(data: mapped)
-        return Data(digest)
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+        var hasher = SHA256()
+        while true {
+            let chunk = try autoreleasepool { try handle.read(upToCount: 1_048_576) }
+            guard let chunk, !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return Data(hasher.finalize())
+    }
+
+    /// Hash off the actor so progress callbacks stay responsive.
+    private static nonisolated func computeHash(at url: URL) async throws -> Data {
+        try await Task.detached(priority: .utility) {
+            try hashFile(at: url)
+        }.value
     }
 
     // MARK: - Download with Progress
@@ -273,23 +347,17 @@ actor DownloadManager {
         from url: URL,
         onBytesWritten: @escaping @Sendable (Int64) -> Void
     ) async throws -> (URL, URLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
-            let delegate = FileDownloadDelegate(
-                onBytesWritten: onBytesWritten,
-                onComplete: { result in
-                    continuation.resume(with: result)
-                }
-            )
-            let config = URLSessionConfiguration.default
-            config.timeoutIntervalForRequest = 300 // 5 min per request
-            config.timeoutIntervalForResource = 43200 // 12 hour total per file
-            let session = URLSession(
-                configuration: config,
-                delegate: delegate,
-                delegateQueue: nil
-            )
-            delegate.session = session
-            session.downloadTask(with: url).resume()
+        let task = session.downloadTask(with: url)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                sessionDelegate.register(task, handler: .init(
+                    onBytesWritten: onBytesWritten,
+                    onComplete: { continuation.resume(with: $0) }
+                ))
+                task.resume()
+            }
+        } onCancel: {
+            task.cancel()
         }
     }
 
@@ -306,7 +374,16 @@ actor DownloadManager {
         case ok(ManifestFile, UInt64)
         case missing(ManifestFile)
         case sizeMismatch(ManifestFile, local: UInt64)
+        case hashMismatch(ManifestFile)
         case unreadable(ManifestFile)
+
+        var file: ManifestFile {
+            switch self {
+            case .ok(let f, _), .missing(let f), .sizeMismatch(let f, _),
+                 .hashMismatch(let f), .unreadable(let f):
+                return f
+            }
+        }
     }
 
     func verifyFiles(
@@ -332,7 +409,7 @@ actor DownloadManager {
                 let file = files[index]
                 index += 1
                 group.addTask {
-                    Self.verifyOneFile(file: file, installDirectory: installDirectory)
+                    await Self.verifyOneFile(file: file, installDirectory: installDirectory)
                 }
             }
 
@@ -345,7 +422,7 @@ actor DownloadManager {
                     let file = files[index]
                     index += 1
                     group.addTask {
-                        Self.verifyOneFile(file: file, installDirectory: installDirectory)
+                        await Self.verifyOneFile(file: file, installDirectory: installDirectory)
                     }
                 }
             }
@@ -353,14 +430,7 @@ actor DownloadManager {
         }
 
         var corruptFiles: [ManifestFile] = []
-        let sorted = results.sorted { lhs, rhs in
-            func path(_ r: VerifyResult) -> String {
-                switch r {
-                case .ok(let f, _), .missing(let f), .sizeMismatch(let f, _), .unreadable(let f): return f.path
-                }
-            }
-            return path(lhs) < path(rhs)
-        }
+        let sorted = results.sorted { $0.file.path < $1.file.path }
 
         for result in sorted {
             switch result {
@@ -372,8 +442,11 @@ actor DownloadManager {
             case .sizeMismatch(let file, let localSize):
                 onLog("SIZE MISMATCH: \(file.path) — local: \(formatSize(localSize)), expected: \(formatSize(file.size)) (diff: \(Self.formatSizeDiff(local: localSize, expected: file.size)))", .warning)
                 corruptFiles.append(file)
+            case .hashMismatch(let file):
+                onLog("HASH MISMATCH: \(file.path) — content differs from manifest", .warning)
+                corruptFiles.append(file)
             case .unreadable(let file):
-                onLog("UNREADABLE: \(file.path) — cannot read file attributes", .error)
+                onLog("UNREADABLE: \(file.path) — cannot read file", .error)
                 corruptFiles.append(file)
             }
         }
@@ -388,7 +461,8 @@ actor DownloadManager {
         return corruptFiles
     }
 
-    private static nonisolated func verifyOneFile(file: ManifestFile, installDirectory: URL) -> VerifyResult {
+    // Nonisolated async so hashing runs on the global executor, off the actor.
+    private static nonisolated func verifyOneFile(file: ManifestFile, installDirectory: URL) async -> VerifyResult {
         let destURL = installDirectory.appendingPathComponent(file.path)
         let fm = FileManager.default
 
@@ -405,18 +479,24 @@ actor DownloadManager {
             return .sizeMismatch(file, local: fileSize)
         }
 
+        if !file.hash.isEmpty {
+            guard let actualHash = try? hashFile(at: destURL) else {
+                return .unreadable(file)
+            }
+            if actualHash != file.hash {
+                return .hashMismatch(file)
+            }
+        }
+
         return .ok(file, fileSize)
     }
 
     private func incrementVerifyProgress(result: VerifyResult) {
         filesCompleted += 1
-        switch result {
-        case .ok(let file, let size):
+        if case .ok(_, let size) = result {
             downloadedBytes += Int64(size)
-            currentFile = file.path
-        case .missing(let file), .sizeMismatch(let file, _), .unreadable(let file):
-            currentFile = file.path
         }
+        currentFile = result.file.path
         sendProgress()
     }
 
@@ -426,47 +506,6 @@ actor DownloadManager {
         } else {
             return "+\(formatSize(local - expected)) over"
         }
-    }
-
-    func repairFiles(
-        files: [ManifestFile],
-        version: String,
-        installDirectory: URL
-    ) async throws {
-        totalBytes = files.reduce(0) { $0 + Int64($1.size) }
-        downloadedBytes = 0
-        inFlightBytes = [:]
-        filesTotal = files.count
-        filesCompleted = 0
-
-        onLog("Repairing \(files.count) files (\(formatSize(UInt64(totalBytes))))", .info)
-        sendProgress()
-
-        let sortedFiles = files.sorted { $0.size < $1.size }
-
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            var index = 0
-
-            for _ in 0..<min(Self.maxConcurrent, sortedFiles.count) {
-                let file = sortedFiles[index]
-                index += 1
-                group.addTask {
-                    try await self.downloadFile(file: file, version: version, to: installDirectory)
-                }
-            }
-
-            for try await _ in group {
-                if index < sortedFiles.count {
-                    let file = sortedFiles[index]
-                    index += 1
-                    group.addTask {
-                        try await self.downloadFile(file: file, version: version, to: installDirectory)
-                    }
-                }
-            }
-        }
-
-        onLog("Repair complete", .success)
     }
 
     // MARK: - Progress Tracking
