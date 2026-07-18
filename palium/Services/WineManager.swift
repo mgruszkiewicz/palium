@@ -36,12 +36,12 @@ nonisolated enum WineManager {
             guard let wineBinary = findWineBinary() else {
                 throw PaliumError.wineNotFound
             }
-            let gptkPrefix = gptkPrefixPath()
-            try await initializePrefix(wineBinary: wineBinary, at: gptkPrefix)
-            let username = try findWineUsername(in: gptkPrefix)
+            let prefix = gptkPrefix
+            try await initializePrefix(wineBinary: wineBinary, at: prefix)
+            let username = try findWineUsername(in: prefix)
             return WineInfo(
                 wineBinaryURL: wineBinary,
-                prefixPath: gptkPrefix,
+                prefixPath: prefix,
                 wineUsername: username,
                 source: .gptk
             )
@@ -52,20 +52,20 @@ nonisolated enum WineManager {
         guard let wineBinary = findGPTKBinary() else {
             throw PaliumError.wineNotFound
         }
-        let gptkPrefix = gptkPrefixPath()
-        if isPrefixValid(gptkPrefix), let username = try? findWineUsername(in: gptkPrefix) {
+        let prefix = gptkPrefix
+        if isPrefixValid(prefix), let username = try? findWineUsername(in: prefix) {
             return WineInfo(
                 wineBinaryURL: wineBinary,
-                prefixPath: gptkPrefix,
+                prefixPath: prefix,
                 wineUsername: username,
                 source: .gptk
             )
         }
-        try await initializePrefix(wineBinary: wineBinary, at: gptkPrefix)
-        let username = try findWineUsername(in: gptkPrefix)
+        try await initializePrefix(wineBinary: wineBinary, at: prefix)
+        let username = try findWineUsername(in: prefix)
         return WineInfo(
             wineBinaryURL: wineBinary,
-            prefixPath: gptkPrefix,
+            prefixPath: prefix,
             wineUsername: username,
             source: .gptk
         )
@@ -121,7 +121,9 @@ nonisolated enum WineManager {
 
     // MARK: - Prefix Management
 
-    private static func gptkPrefixPath() -> URL {
+    /// The prefix Palium manages itself (GPTK mode). Exposed so UI code
+    /// (e.g. Troubleshooting's "Delete Wine Prefix") uses the same path.
+    static var gptkPrefix: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(gptkPrefixRelativePath)
     }
@@ -231,7 +233,23 @@ nonisolated enum WineManager {
 
             let didResume = OSAllocatedUnfairLock(initialState: false)
 
+            // Weak capture: don't keep the (finished) process alive until the
+            // timeout deadline; cancelled in the termination handler.
+            let timeoutWork = DispatchWorkItem { [weak process] in
+                let shouldResume = didResume.withLock { flag -> Bool in
+                    if flag { return false }
+                    flag = true
+                    return true
+                }
+                guard shouldResume else { return }
+                if let process, process.isRunning { process.terminate() }
+                continuation.resume(throwing: PaliumError.launchFailed(
+                    "Wine process timed out after \(Int(timeout))s"
+                ))
+            }
+
             process.terminationHandler = { proc in
+                timeoutWork.cancel()
                 let shouldResume = didResume.withLock { flag -> Bool in
                     if flag { return false }
                     flag = true
@@ -247,18 +265,7 @@ nonisolated enum WineManager {
                 }
             }
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                let shouldResume = didResume.withLock { flag -> Bool in
-                    if flag { return false }
-                    flag = true
-                    return true
-                }
-                guard shouldResume else { return }
-                if process.isRunning { process.terminate() }
-                continuation.resume(throwing: PaliumError.launchFailed(
-                    "Wine process timed out after \(Int(timeout))s"
-                ))
-            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
 
             do {
                 try process.run()
@@ -276,7 +283,8 @@ nonisolated enum WineManager {
 
     // MARK: - Diagnostics
 
-    struct DiagnosticResult: Sendable {
+    struct DiagnosticResult: Sendable, Identifiable {
+        var id: String { name }
         let name: String
         let passed: Bool
         let detail: String

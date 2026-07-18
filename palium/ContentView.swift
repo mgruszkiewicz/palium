@@ -415,9 +415,14 @@ struct ContentView: View {
             // Install VC++ runtime if not already present in prefix
             if !WineManager.isVCRuntimeInstalled(info: info) {
                 appState.statusMessage = "Installing VC++ runtime..."
+                appState.showDebugLog = true
                 appState.log("VC++ runtime not found in prefix, installing...")
                 do {
-                    try await WineManager.installVCRuntime(info: info)
+                    try await WineManager.installVCRuntime(info: info) { [appState] message, level in
+                        Task { @MainActor in
+                            appState.log(message, level: level)
+                        }
+                    }
                     appState.log("VC++ runtime installed", level: .success)
                 } catch {
                     appState.log("VC++ runtime install failed: \(error.localizedDescription) — game may still work", level: .warning)
@@ -550,21 +555,16 @@ struct ContentView: View {
         )
         appState.log("Launching game (DX11, Metal HUD: \(options.metalHUD ? "ON" : "OFF"))...")
         do {
-            let process = try GameLauncher.launch(info: info, options: options)
-            appState.gameProcess = process
-            appState.phase = .launching
-            appState.log("Game process started (PID: \(process.processIdentifier))", level: .success)
-
-            // Monitor process in background
-            Task.detached {
-                process.waitUntilExit()
-                let status = process.terminationStatus
-                await MainActor.run {
+            let process = try GameLauncher.launch(info: info, options: options) { [appState] status in
+                Task { @MainActor in
                     appState.log("Game exited with status \(status)", level: status == 0 ? .info : .warning)
                     appState.gameProcess = nil
                     appState.phase = .ready
                 }
             }
+            appState.gameProcess = process
+            appState.phase = .launching
+            appState.log("Game process started (PID: \(process.processIdentifier))", level: .success)
         } catch let error as PaliumError {
             appState.log("Launch failed: \(error.localizedDescription)", level: .error)
             appState.phase = .error(error)

@@ -26,8 +26,19 @@ class LaunchSettings {
 
     private static let storageKey = "launchSettings_v2"
 
+    /// Suppresses the didSet-triggered save() while restoring persisted values —
+    /// property observers fire for assignments made during load.
+    @ObservationIgnored private var isLoaded = false
+
     private init() {
-        load()
+        if let data = UserDefaults.standard.data(forKey: Self.storageKey),
+           let stored = try? JSONDecoder().decode(StoredSettings.self, from: data) {
+            wineSource = stored.wineSource
+            metalHUD = stored.metalHUD
+            useAllCores = stored.useAllCores
+            installedVersion = stored.installedVersion
+        }
+        isLoaded = true
     }
 
     private struct StoredSettings: Codable {
@@ -37,18 +48,8 @@ class LaunchSettings {
         var installedVersion: String?
     }
 
-    private func load() {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey),
-              let stored = try? JSONDecoder().decode(StoredSettings.self, from: data) else {
-            return
-        }
-        wineSource = stored.wineSource
-        metalHUD = stored.metalHUD
-        useAllCores = stored.useAllCores
-        installedVersion = stored.installedVersion
-    }
-
     private func save() {
+        guard isLoaded else { return }
         let stored = StoredSettings(
             wineSource: wineSource,
             metalHUD: metalHUD,
