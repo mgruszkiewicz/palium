@@ -68,291 +68,300 @@ nonisolated enum FlexValue: Sendable {
 
 nonisolated enum FlexBuffersParser {
 
-    // MARK: - FlexBuffers Type Constants
-
-    private static let FBT_NULL: UInt8 = 0
-    private static let FBT_INT: UInt8 = 1
-    private static let FBT_UINT: UInt8 = 2
-    private static let FBT_FLOAT: UInt8 = 3
-    private static let FBT_KEY: UInt8 = 4
-    private static let FBT_STRING: UInt8 = 5
-    private static let FBT_INDIRECT_INT: UInt8 = 6
-    private static let FBT_INDIRECT_UINT: UInt8 = 7
-    private static let FBT_INDIRECT_FLOAT: UInt8 = 8
-    private static let FBT_MAP: UInt8 = 9
-    private static let FBT_VECTOR: UInt8 = 10
-    private static let FBT_VECTOR_INT: UInt8 = 11
-    private static let FBT_VECTOR_UINT: UInt8 = 12
-    private static let FBT_VECTOR_FLOAT: UInt8 = 13
-    private static let FBT_VECTOR_KEY: UInt8 = 14
-    private static let FBT_VECTOR_STRING: UInt8 = 15
-    private static let FBT_VECTOR_INT2: UInt8 = 16
-    private static let FBT_VECTOR_UINT2: UInt8 = 17
-    private static let FBT_VECTOR_FLOAT2: UInt8 = 18
-    private static let FBT_VECTOR_INT3: UInt8 = 19
-    private static let FBT_VECTOR_UINT3: UInt8 = 20
-    private static let FBT_VECTOR_FLOAT3: UInt8 = 21
-    private static let FBT_VECTOR_INT4: UInt8 = 22
-    private static let FBT_VECTOR_UINT4: UInt8 = 23
-    private static let FBT_VECTOR_FLOAT4: UInt8 = 24
-    private static let FBT_BLOB: UInt8 = 25
-    private static let FBT_BOOL: UInt8 = 26
-
     struct ParseError: Error, CustomStringConvertible {
         let message: String
         var description: String { message }
     }
 
+    /// Decode an entire buffer into an eager FlexValue tree.
+    /// For large documents prefer `root(_:)` and walking the lazy FlexRef,
+    /// which only decodes the values actually visited.
     static func decode(_ data: Data) throws -> FlexValue {
+        try root(data).materialized()
+    }
+
+    /// Entry point for lazy traversal: returns a reference to the root value.
+    static func root(_ data: Data) throws -> FlexRef {
         guard data.count >= 3 else {
             throw ParseError(message: "Buffer too small for FlexBuffers")
         }
-        let rootByteWidth = Int(data[data.count - 1])
-        let rootPackedType = data[data.count - 2]
-        let rootOffset = data.count - 2 - rootByteWidth
-        return decodeValue(data, offset: rootOffset, parentByteWidth: rootByteWidth, packedType: rootPackedType)
+        let bytes = [UInt8](data)
+        let rootByteWidth = Int(bytes[bytes.count - 1])
+        let rootPackedType = bytes[bytes.count - 2]
+        let rootOffset = bytes.count - 2 - rootByteWidth
+        guard rootByteWidth >= 1, rootOffset >= 0 else {
+            throw ParseError(message: "Invalid FlexBuffers root byte width")
+        }
+        return FlexRef(bytes: bytes, offset: rootOffset, slotWidth: rootByteWidth, packedType: rootPackedType)
     }
+}
 
-    // MARK: - Primitive Reads
+// MARK: - FlexRef
 
-    private static func readUInt(_ data: Data, offset: Int, byteWidth: Int) -> UInt64 {
-        switch byteWidth {
-        case 1: return UInt64(data[offset])
-        case 2:
-            return data.withUnsafeBytes { ptr in
-                UInt64(ptr.load(fromByteOffset: offset, as: UInt16.self).littleEndian)
+/// A lazy, bounds-checked reference into a FlexBuffers document.
+/// Accessors return nil instead of crashing on malformed or truncated input,
+/// and children are decoded on demand rather than materializing the full tree.
+nonisolated struct FlexRef: Sendable {
+
+    // FlexBuffers type ids
+    private static let tNull: UInt8 = 0
+    private static let tInt: UInt8 = 1
+    private static let tUInt: UInt8 = 2
+    private static let tFloat: UInt8 = 3
+    private static let tKey: UInt8 = 4
+    private static let tString: UInt8 = 5
+    private static let tIndirectInt: UInt8 = 6
+    private static let tIndirectUInt: UInt8 = 7
+    private static let tIndirectFloat: UInt8 = 8
+    private static let tMap: UInt8 = 9
+    private static let tVector: UInt8 = 10
+    private static let tVectorInt: UInt8 = 11
+    private static let tVectorUInt: UInt8 = 12
+    private static let tVectorFloat: UInt8 = 13
+    private static let tVectorKey: UInt8 = 14
+    private static let tVectorString: UInt8 = 15
+    private static let tVectorInt2: UInt8 = 16
+    private static let tVectorFloat4: UInt8 = 24
+    private static let tBlob: UInt8 = 25
+    private static let tBool: UInt8 = 26
+
+    fileprivate let bytes: [UInt8]
+    /// Position of this value's slot within `bytes`.
+    fileprivate let offset: Int
+    /// Byte width of the slot (the enclosing container's element width).
+    fileprivate let slotWidth: Int
+    fileprivate let packedType: UInt8
+
+    private var typeId: UInt8 { packedType >> 2 }
+    private var childWidth: Int { 1 << Int(packedType & 0x03) }
+
+    // MARK: Bounds-checked primitive reads
+
+    private func readUInt(at offset: Int, width: Int) -> UInt64? {
+        guard offset >= 0, width >= 1, offset <= bytes.count - width else { return nil }
+        return bytes.withUnsafeBytes { ptr in
+            switch width {
+            case 1: return UInt64(ptr.loadUnaligned(fromByteOffset: offset, as: UInt8.self))
+            case 2: return UInt64(UInt16(littleEndian: ptr.loadUnaligned(fromByteOffset: offset, as: UInt16.self)))
+            case 4: return UInt64(UInt32(littleEndian: ptr.loadUnaligned(fromByteOffset: offset, as: UInt32.self)))
+            case 8: return UInt64(littleEndian: ptr.loadUnaligned(fromByteOffset: offset, as: UInt64.self))
+            default: return nil
             }
-        case 4:
-            return data.withUnsafeBytes { ptr in
-                UInt64(ptr.load(fromByteOffset: offset, as: UInt32.self).littleEndian)
-            }
-        case 8:
-            return data.withUnsafeBytes { ptr in
-                ptr.load(fromByteOffset: offset, as: UInt64.self).littleEndian
-            }
-        default: return 0
         }
     }
 
-    private static func readInt(_ data: Data, offset: Int, byteWidth: Int) -> Int64 {
-        switch byteWidth {
-        case 1: return Int64(Int8(bitPattern: data[offset]))
-        case 2:
-            return data.withUnsafeBytes { ptr in
-                Int64(Int16(bitPattern: ptr.load(fromByteOffset: offset, as: UInt16.self).littleEndian))
-            }
-        case 4:
-            return data.withUnsafeBytes { ptr in
-                Int64(Int32(bitPattern: ptr.load(fromByteOffset: offset, as: UInt32.self).littleEndian))
-            }
-        case 8:
-            return data.withUnsafeBytes { ptr in
-                Int64(bitPattern: ptr.load(fromByteOffset: offset, as: UInt64.self).littleEndian)
-            }
-        default: return 0
+    private func readInt(at offset: Int, width: Int) -> Int64? {
+        guard let raw = readUInt(at: offset, width: width) else { return nil }
+        switch width {
+        case 1: return Int64(Int8(bitPattern: UInt8(truncatingIfNeeded: raw)))
+        case 2: return Int64(Int16(bitPattern: UInt16(truncatingIfNeeded: raw)))
+        case 4: return Int64(Int32(bitPattern: UInt32(truncatingIfNeeded: raw)))
+        case 8: return Int64(bitPattern: raw)
+        default: return nil
         }
     }
 
-    private static func readFloat(_ data: Data, offset: Int, byteWidth: Int) -> Double {
-        switch byteWidth {
-        case 4:
-            return data.withUnsafeBytes { ptr in
-                Double(ptr.load(fromByteOffset: offset, as: Float.self))
-            }
-        case 8:
-            return data.withUnsafeBytes { ptr in
-                ptr.load(fromByteOffset: offset, as: Double.self)
-            }
-        default: return 0
+    private func readFloat(at offset: Int, width: Int) -> Double? {
+        guard let raw = readUInt(at: offset, width: width) else { return nil }
+        switch width {
+        case 4: return Double(Float(bitPattern: UInt32(truncatingIfNeeded: raw)))
+        case 8: return Double(bitPattern: raw)
+        default: return nil
         }
     }
 
-    private static func readString(_ data: Data, offset: Int) -> String {
+    private func readCString(at offset: Int) -> String? {
+        guard offset >= 0, offset < bytes.count else { return nil }
         var end = offset
-        while end < data.count && data[end] != 0 {
+        while end < bytes.count && bytes[end] != 0 {
             end += 1
         }
-        return String(data: data[offset..<end], encoding: .utf8) ?? ""
+        return String(decoding: bytes[offset..<end], as: UTF8.self)
     }
 
-    // MARK: - Value Decoding
-
-    private static func decodeValue(_ data: Data, offset: Int, parentByteWidth: Int, packedType: UInt8) -> FlexValue {
-        let bitWidth = Int(packedType & 0x03)
-        let typeId = packedType >> 2
-        let childByteWidth = 1 << bitWidth
-        return decodeTypedValue(data, offset: offset, parentByteWidth: parentByteWidth,
-                                childByteWidth: childByteWidth, typeId: typeId)
+    /// Resolve the slot's relative offset to the position it points at.
+    private var indirectTarget: Int? {
+        guard let rel = readUInt(at: offset, width: slotWidth), rel <= UInt64(offset) else { return nil }
+        return offset - Int(rel)
     }
 
-    private static func decodeTypedValue(_ data: Data, offset: Int, parentByteWidth: Int,
-                                          childByteWidth: Int, typeId: UInt8) -> FlexValue {
+    // MARK: Scalar accessors
+
+    var boolValue: Bool? {
+        guard typeId == Self.tBool else { return nil }
+        return readUInt(at: offset, width: slotWidth).map { $0 != 0 }
+    }
+
+    var intValue: Int64? {
         switch typeId {
-        case FBT_NULL:
-            return .null
+        case Self.tInt: return readInt(at: offset, width: slotWidth)
+        case Self.tIndirectInt: return indirectTarget.flatMap { readInt(at: $0, width: childWidth) }
+        case Self.tUInt, Self.tIndirectUInt:
+            return uintValue.flatMap { $0 <= UInt64(Int64.max) ? Int64($0) : nil }
+        default: return nil
+        }
+    }
 
-        case FBT_BOOL:
-            return .bool(readUInt(data, offset: offset, byteWidth: parentByteWidth) != 0)
+    var uintValue: UInt64? {
+        switch typeId {
+        case Self.tUInt: return readUInt(at: offset, width: slotWidth)
+        case Self.tIndirectUInt: return indirectTarget.flatMap { readUInt(at: $0, width: childWidth) }
+        case Self.tInt, Self.tIndirectInt:
+            return intValue.flatMap { $0 >= 0 ? UInt64($0) : nil }
+        default: return nil
+        }
+    }
 
-        case FBT_INT:
-            return .int(readInt(data, offset: offset, byteWidth: parentByteWidth))
+    var floatValue: Double? {
+        switch typeId {
+        case Self.tFloat: return readFloat(at: offset, width: slotWidth)
+        case Self.tIndirectFloat: return indirectTarget.flatMap { readFloat(at: $0, width: childWidth) }
+        default: return nil
+        }
+    }
 
-        case FBT_UINT:
-            return .uint(readUInt(data, offset: offset, byteWidth: parentByteWidth))
+    var stringValue: String? {
+        guard typeId == Self.tString || typeId == Self.tKey else { return nil }
+        return indirectTarget.flatMap { readCString(at: $0) }
+    }
 
-        case FBT_FLOAT:
-            return .float(readFloat(data, offset: offset, byteWidth: parentByteWidth))
+    /// Blob contents, copied out so the result does not pin the whole document.
+    var blobValue: Data? {
+        guard typeId == Self.tBlob,
+              let target = indirectTarget,
+              let size64 = readUInt(at: target - childWidth, width: childWidth),
+              let size = Int(exactly: size64),
+              size >= 0, target <= bytes.count - size else { return nil }
+        return Data(bytes[target..<(target + size)])
+    }
 
-        case FBT_STRING:
-            let strOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-            return .string(readString(data, offset: strOffset))
+    // MARK: Composite accessors
 
-        case FBT_KEY:
-            let keyOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-            return .string(readString(data, offset: keyOffset))
+    var isNull: Bool { typeId == Self.tNull }
+    var isMap: Bool { typeId == Self.tMap }
 
-        case FBT_BLOB:
-            let blobOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-            let size = Int(readUInt(data, offset: blobOffset - childByteWidth, byteWidth: childByteWidth))
-            return .blob(data[blobOffset..<(blobOffset + size)])
+    var isVector: Bool {
+        typeId == Self.tVector || isTypedVector || isFixedTypedVector
+    }
 
-        case FBT_INDIRECT_INT:
-            let indirectOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-            return .int(readInt(data, offset: indirectOffset, byteWidth: childByteWidth))
+    private var isTypedVector: Bool {
+        typeId >= Self.tVectorInt && typeId <= Self.tVectorString
+    }
 
-        case FBT_INDIRECT_UINT:
-            let indirectOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-            return .uint(readUInt(data, offset: indirectOffset, byteWidth: childByteWidth))
+    private var isFixedTypedVector: Bool {
+        typeId >= Self.tVectorInt2 && typeId <= Self.tVectorFloat4
+    }
 
-        case FBT_INDIRECT_FLOAT:
-            let indirectOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-            return .float(readFloat(data, offset: indirectOffset, byteWidth: childByteWidth))
+    /// Element count for vectors, key/value pair count for maps.
+    var count: Int {
+        if typeId == Self.tMap || typeId == Self.tVector || isTypedVector {
+            guard let base = indirectTarget,
+                  let n = readUInt(at: base - childWidth, width: childWidth),
+                  let c = Int(exactly: n),
+                  c >= 0, c <= (bytes.count - base) / childWidth else { return 0 }
+            return c
+        }
+        if isFixedTypedVector {
+            // Fixed vectors encode the length in the type: INT2/UINT2/FLOAT2, INT3/..., INT4/...
+            return 2 + Int(typeId - Self.tVectorInt2) / 3
+        }
+        return 0
+    }
 
-        case FBT_MAP:
-            return decodeMap(data, offset: offset, parentByteWidth: parentByteWidth, byteWidth: childByteWidth)
-
-        case FBT_VECTOR:
-            return decodeVector(data, offset: offset, parentByteWidth: parentByteWidth, byteWidth: childByteWidth)
-
-        case FBT_VECTOR_INT, FBT_VECTOR_UINT, FBT_VECTOR_FLOAT,
-             FBT_VECTOR_KEY, FBT_VECTOR_STRING, FBT_BOOL:
-            return decodeTypedVector(data, offset: offset, parentByteWidth: parentByteWidth,
-                                     byteWidth: childByteWidth, typeId: typeId)
-
-        case FBT_VECTOR_INT2, FBT_VECTOR_UINT2, FBT_VECTOR_FLOAT2,
-             FBT_VECTOR_INT3, FBT_VECTOR_UINT3, FBT_VECTOR_FLOAT3,
-             FBT_VECTOR_INT4, FBT_VECTOR_UINT4, FBT_VECTOR_FLOAT4:
-            return decodeFixedTypedVector(data, offset: offset, parentByteWidth: parentByteWidth,
-                                          byteWidth: childByteWidth, typeId: typeId)
-
+    private var typedElementType: UInt8 {
+        switch typeId {
+        case Self.tVectorUInt: return Self.tUInt
+        case Self.tVectorFloat: return Self.tFloat
+        case Self.tVectorKey: return Self.tKey
+        case Self.tVectorString: return Self.tString
+        case Self.tVectorInt: return Self.tInt
         default:
-            return .null
-        }
-    }
-
-    // MARK: - Composite Decoding
-
-    private static func decodeVector(_ data: Data, offset: Int, parentByteWidth: Int, byteWidth: Int) -> FlexValue {
-        let vecOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-        let size = Int(readUInt(data, offset: vecOffset - byteWidth, byteWidth: byteWidth))
-        let typeVecOffset = vecOffset + size * byteWidth
-
-        var result: [FlexValue] = []
-        result.reserveCapacity(size)
-        for i in 0..<size {
-            let elemOffset = vecOffset + i * byteWidth
-            let packedType = data[typeVecOffset + i]
-            result.append(decodeValue(data, offset: elemOffset, parentByteWidth: byteWidth, packedType: packedType))
-        }
-        return .vector(result)
-    }
-
-    private static func decodeTypedVector(_ data: Data, offset: Int, parentByteWidth: Int,
-                                           byteWidth: Int, typeId: UInt8) -> FlexValue {
-        let vecOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-        let size = Int(readUInt(data, offset: vecOffset - byteWidth, byteWidth: byteWidth))
-
-        let elemTypeMap: [UInt8: UInt8] = [
-            FBT_VECTOR_INT: FBT_INT,
-            FBT_VECTOR_UINT: FBT_UINT,
-            FBT_VECTOR_FLOAT: FBT_FLOAT,
-            FBT_VECTOR_KEY: FBT_KEY,
-            FBT_VECTOR_STRING: FBT_STRING,
-            FBT_BOOL: FBT_BOOL,
-        ]
-        let elemType = elemTypeMap[typeId] ?? FBT_NULL
-
-        var result: [FlexValue] = []
-        result.reserveCapacity(size)
-        for i in 0..<size {
-            let elemOffset = vecOffset + i * byteWidth
-            result.append(decodeTypedValue(data, offset: elemOffset, parentByteWidth: byteWidth,
-                                           childByteWidth: byteWidth, typeId: elemType))
-        }
-        return .vector(result)
-    }
-
-    private static func decodeFixedTypedVector(_ data: Data, offset: Int, parentByteWidth: Int,
-                                                byteWidth: Int, typeId: UInt8) -> FlexValue {
-        let vecOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-
-        let count: Int
-        switch typeId {
-        case FBT_VECTOR_INT2, FBT_VECTOR_UINT2, FBT_VECTOR_FLOAT2: count = 2
-        case FBT_VECTOR_INT3, FBT_VECTOR_UINT3, FBT_VECTOR_FLOAT3: count = 3
-        default: count = 4
-        }
-
-        let elemType: UInt8
-        switch typeId {
-        case FBT_VECTOR_INT2, FBT_VECTOR_INT3, FBT_VECTOR_INT4: elemType = FBT_INT
-        case FBT_VECTOR_UINT2, FBT_VECTOR_UINT3, FBT_VECTOR_UINT4: elemType = FBT_UINT
-        default: elemType = FBT_FLOAT
-        }
-
-        var result: [FlexValue] = []
-        result.reserveCapacity(count)
-        for i in 0..<count {
-            let elemOffset = vecOffset + i * byteWidth
-            result.append(decodeTypedValue(data, offset: elemOffset, parentByteWidth: byteWidth,
-                                           childByteWidth: byteWidth, typeId: elemType))
-        }
-        return .vector(result)
-    }
-
-    private static func decodeMap(_ data: Data, offset: Int, parentByteWidth: Int, byteWidth: Int) -> FlexValue {
-        let vecOffset = offset - Int(readUInt(data, offset: offset, byteWidth: parentByteWidth))
-        let size = Int(readUInt(data, offset: vecOffset - byteWidth, byteWidth: byteWidth))
-
-        // Keys metadata is stored before the size field
-        let keysOffsetPos = vecOffset - byteWidth * 3
-        let keysOffsetVal = Int(readUInt(data, offset: keysOffsetPos, byteWidth: byteWidth))
-        let keysByteWidth = Int(readUInt(data, offset: keysOffsetPos + byteWidth, byteWidth: byteWidth))
-        let keysVecOffset = keysOffsetPos - keysOffsetVal
-
-        let typeVecOffset = vecOffset + size * byteWidth
-
-        var result: [String: FlexValue] = [:]
-        result.reserveCapacity(size)
-        for i in 0..<size {
-            // Decode key
-            let keyOffset = keysVecOffset + i * keysByteWidth
-            let key: String
-            if case .string(let s) = decodeTypedValue(data, offset: keyOffset,
-                                                       parentByteWidth: keysByteWidth,
-                                                       childByteWidth: keysByteWidth,
-                                                       typeId: FBT_KEY) {
-                key = s
-            } else {
-                key = "unknown_\(i)"
+            // Fixed typed vectors cycle INT, UINT, FLOAT
+            switch Int(typeId - Self.tVectorInt2) % 3 {
+            case 0: return Self.tInt
+            case 1: return Self.tUInt
+            default: return Self.tFloat
             }
-
-            // Decode value
-            let valOffset = vecOffset + i * byteWidth
-            let packedType = data[typeVecOffset + i]
-            let val = decodeValue(data, offset: valOffset, parentByteWidth: byteWidth, packedType: packedType)
-            result[key] = val
         }
-        return .map(result)
+    }
+
+    subscript(index: Int) -> FlexRef? {
+        let n = count
+        guard index >= 0, index < n, let base = indirectTarget else { return nil }
+        let elemOffset = base + index * childWidth
+
+        if typeId == Self.tVector || typeId == Self.tMap {
+            let typePos = base + n * childWidth + index
+            guard typePos < bytes.count else { return nil }
+            return FlexRef(bytes: bytes, offset: elemOffset, slotWidth: childWidth, packedType: bytes[typePos])
+        }
+        if isTypedVector || isFixedTypedVector {
+            let widthBits = UInt8(childWidth.trailingZeroBitCount)
+            return FlexRef(bytes: bytes, offset: elemOffset, slotWidth: childWidth,
+                           packedType: (typedElementType << 2) | widthBits)
+        }
+        return nil
+    }
+
+    func key(at index: Int) -> String? {
+        guard typeId == Self.tMap, index >= 0, index < count, let base = indirectTarget else { return nil }
+        let w = childWidth
+        // The keys vector descriptor (offset + byte width) sits before the size field.
+        let keysOffsetPos = base - w * 3
+        guard let rel = readUInt(at: keysOffsetPos, width: w),
+              rel <= UInt64(keysOffsetPos),
+              let keysWidth64 = readUInt(at: keysOffsetPos + w, width: w),
+              let keysWidth = Int(exactly: keysWidth64),
+              keysWidth >= 1 else { return nil }
+        let keySlot = (keysOffsetPos - Int(rel)) + index * keysWidth
+        guard let keyRel = readUInt(at: keySlot, width: keysWidth), keyRel <= UInt64(keySlot) else { return nil }
+        return readCString(at: keySlot - Int(keyRel))
+    }
+
+    subscript(key: String) -> FlexRef? {
+        guard typeId == Self.tMap else { return nil }
+        for i in 0..<count where self.key(at: i) == key {
+            return self[i]
+        }
+        return nil
+    }
+
+    // MARK: Materialization
+
+    /// Eagerly decode this value (and all children) into a FlexValue tree.
+    func materialized() -> FlexValue {
+        switch typeId {
+        case Self.tNull:
+            return .null
+        case Self.tBool:
+            return boolValue.map(FlexValue.bool) ?? .null
+        case Self.tInt, Self.tIndirectInt:
+            return intValue.map(FlexValue.int) ?? .null
+        case Self.tUInt, Self.tIndirectUInt:
+            return uintValue.map(FlexValue.uint) ?? .null
+        case Self.tFloat, Self.tIndirectFloat:
+            return floatValue.map(FlexValue.float) ?? .null
+        case Self.tString, Self.tKey:
+            return stringValue.map(FlexValue.string) ?? .null
+        case Self.tBlob:
+            return blobValue.map(FlexValue.blob) ?? .null
+        case Self.tMap:
+            let n = count
+            var result: [String: FlexValue] = [:]
+            result.reserveCapacity(n)
+            for i in 0..<n {
+                result[key(at: i) ?? "unknown_\(i)"] = self[i]?.materialized() ?? .null
+            }
+            return .map(result)
+        default:
+            guard isVector else { return .null }
+            let n = count
+            var result: [FlexValue] = []
+            result.reserveCapacity(n)
+            for i in 0..<n {
+                result.append(self[i]?.materialized() ?? .null)
+            }
+            return .vector(result)
+        }
     }
 }

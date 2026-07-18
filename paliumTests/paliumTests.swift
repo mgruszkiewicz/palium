@@ -74,6 +74,49 @@ struct FlexBuffersParserTests {
         #expect(result.uintValue == 1000)
     }
 
+    @Test func decodeMap() throws {
+        // {"a": 42} encoded by hand (all byte widths 1):
+        // key cstring, keys vector (len + offset), keys descriptor (offset + width),
+        // values vector (len + value), element types, root offset, type, width.
+        let data = Data([0x61, 0x00, 0x01, 0x03, 0x01, 0x01, 0x01, 42, 8, 0x02, 0x24, 0x01])
+        let result = try FlexBuffersParser.decode(data)
+        #expect(result["a"]?.uintValue == 42)
+
+        let root = try FlexBuffersParser.root(data)
+        #expect(root.isMap)
+        #expect(root.count == 1)
+        #expect(root.key(at: 0) == "a")
+        #expect(root["a"]?.uintValue == 42)
+        #expect(root["missing"] == nil)
+    }
+
+    @Test func decodeVector() throws {
+        // [1, 2] encoded by hand: len, values, element types, root offset, type, width
+        let data = Data([2, 1, 2, 8, 8, 4, 0x28, 1])
+        let result = try FlexBuffersParser.decode(data)
+        #expect(result[0]?.uintValue == 1)
+        #expect(result[1]?.uintValue == 2)
+        #expect(result[2] == nil)
+
+        let root = try FlexBuffersParser.root(data)
+        #expect(root.isVector)
+        #expect(root.count == 2)
+        #expect(root[1]?.uintValue == 2)
+    }
+
+    @Test func decodeMalformedBufferDoesNotCrash() throws {
+        // Garbage offsets and truncated buffers must degrade gracefully, not crash.
+        let buffers: [Data] = [
+            Data([0xFF, 0xFE, 0x24, 0x08]),             // map with nonsense offsets
+            Data([0xFF, 0xFF, 0xFF, 0x28, 0x08]),       // vector with absurd width
+            Data([0x00, 0x64, 0x01]),                    // blob pointing out of bounds
+            Data((0..<64).map { _ in UInt8.random(in: 0...255) } + [0x24, 0x01]),
+        ]
+        for data in buffers {
+            _ = try? FlexBuffersParser.decode(data)
+        }
+    }
+
     @Test func decodeString() throws {
         // FlexBuffers string: length-prefixed, null-terminated
         // "hi" = [2(len), 'h', 'i', 0, packed_type, byte_width]
@@ -200,15 +243,8 @@ struct CDNClientTests {
 struct ManifestModelTests {
 
     @Test func manifestFileIdentity() {
-        let file = ManifestFile(path: "test/file.exe", size: 1024, hash: Data(), chunks: [])
+        let file = ManifestFile(path: "test/file.exe", size: 1024, hash: Data())
         #expect(file.id == "test/file.exe")
-    }
-
-    @Test func manifestChunkProperties() {
-        let chunk = ManifestChunk(offset: 0, size: 512, hash: Data([0xAB, 0xCD]))
-        #expect(chunk.offset == 0)
-        #expect(chunk.size == 512)
-        #expect(chunk.hash.count == 2)
     }
 
     @Test func updateManifestTotalSize() {
@@ -217,8 +253,8 @@ struct ManifestModelTests {
             version: "1.0",
             platform: "windows",
             files: [
-                ManifestFile(path: "a.exe", size: 100, hash: Data(), chunks: []),
-                ManifestFile(path: "b.pak", size: 200, hash: Data(), chunks: []),
+                ManifestFile(path: "a.exe", size: 100, hash: Data()),
+                ManifestFile(path: "b.pak", size: 200, hash: Data()),
             ],
             totalSize: 300
         )
