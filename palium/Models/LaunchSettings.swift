@@ -24,6 +24,10 @@ class LaunchSettings {
     // Installed game version (persisted to detect updates)
     var installedVersion: String? { didSet { save() } }
 
+    // SHA-256 of the manifest's "contents" node at install time — catches
+    // content updates the CDN ships without bumping the channel version.
+    var installedManifestHash: Data? { didSet { save() } }
+
     private static let storageKey = "launchSettings_v2"
 
     /// Suppresses the didSet-triggered save() while restoring persisted values —
@@ -37,6 +41,7 @@ class LaunchSettings {
             metalHUD = stored.metalHUD
             useAllCores = stored.useAllCores
             installedVersion = stored.installedVersion
+            installedManifestHash = stored.installedManifestHash
         }
         isLoaded = true
     }
@@ -46,6 +51,7 @@ class LaunchSettings {
         var metalHUD: Bool = false
         var useAllCores: Bool = true
         var installedVersion: String?
+        var installedManifestHash: Data?
     }
 
     private func save() {
@@ -54,7 +60,8 @@ class LaunchSettings {
             wineSource: wineSource,
             metalHUD: metalHUD,
             useAllCores: useAllCores,
-            installedVersion: installedVersion
+            installedVersion: installedVersion,
+            installedManifestHash: installedManifestHash
         )
         if let data = try? JSONEncoder().encode(stored) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)

@@ -256,7 +256,8 @@ struct ManifestModelTests {
                 ManifestFile(path: "a.exe", size: 100, hash: Data()),
                 ManifestFile(path: "b.pak", size: 200, hash: Data()),
             ],
-            totalSize: 300
+            totalSize: 300,
+            contentsHash: Data()
         )
         #expect(manifest.files.count == 2)
         #expect(manifest.totalSize == 300)

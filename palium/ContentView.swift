@@ -234,9 +234,15 @@ struct ContentView: View {
             Text("Update Available")
                 .font(.headline)
 
-            Text("v\(appState.localGameVersion) → v\(appState.gameVersion)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            Group {
+                if appState.localGameVersion == appState.gameVersion {
+                    Text("New content available for v\(appState.gameVersion)")
+                } else {
+                    Text("v\(appState.localGameVersion) → v\(appState.gameVersion)")
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
 
             if let manifest = appState.manifest {
                 Text("\(manifest.files.count) files — only changed files will be downloaded")
@@ -478,19 +484,34 @@ struct ContentView: View {
             appState.log("Game found at \(info.gameInstallPath.path)", level: .success)
 
             let localVersion = LaunchSettings.shared.installedVersion
+            let localHash = LaunchSettings.shared.installedManifestHash
+            let cdnHash = appState.manifest?.contentsHash
+
             if let localVersion {
                 appState.localGameVersion = localVersion
                 appState.log("Installed version: \(localVersion)", level: .info)
 
-                if localVersion != appState.gameVersion {
-                    appState.log("Update available: \(localVersion) → \(appState.gameVersion)", level: .warning)
+                let versionChanged = localVersion != appState.gameVersion
+                // A stale hash always signals a real content change; a missing hash just
+                // means this build predates hash tracking — backfill it, don't force an update.
+                let contentChanged = localHash != nil && localHash != cdnHash
+
+                if versionChanged || contentChanged {
+                    let reason = versionChanged
+                        ? "\(localVersion) → \(appState.gameVersion)"
+                        : "content update for v\(appState.gameVersion)"
+                    appState.log("Update available: \(reason)", level: .warning)
                     appState.phase = .needsUpdate
                 } else {
+                    if localHash == nil {
+                        LaunchSettings.shared.installedManifestHash = cdnHash
+                    }
                     appState.phase = .ready
                 }
             } else {
                 appState.log("No stored version found — assuming up to date", level: .warning)
                 LaunchSettings.shared.installedVersion = appState.gameVersion
+                LaunchSettings.shared.installedManifestHash = cdnHash
                 appState.phase = .ready
             }
         } else {
@@ -524,6 +545,7 @@ struct ContentView: View {
                     installDirectory: info.gameInstallPath
                 )
                 LaunchSettings.shared.installedVersion = appState.gameVersion
+                LaunchSettings.shared.installedManifestHash = manifest.contentsHash
                 appState.phase = .ready
             } catch is CancellationError {
                 appState.log("Download cancelled", level: .warning)
@@ -596,6 +618,8 @@ struct ContentView: View {
 
         if corruptFiles.isEmpty {
             appState.statusMessage = "All files verified successfully"
+            LaunchSettings.shared.installedVersion = appState.gameVersion
+            LaunchSettings.shared.installedManifestHash = manifest.contentsHash
             appState.phase = .ready
             return
         }
@@ -613,6 +637,8 @@ struct ContentView: View {
                 version: appState.gameVersion,
                 installDirectory: info.gameInstallPath
             )
+            LaunchSettings.shared.installedVersion = appState.gameVersion
+            LaunchSettings.shared.installedManifestHash = manifest.contentsHash
             appState.phase = .ready
         } catch let error as PaliumError {
             appState.log("Repair failed: \(error.localizedDescription)", level: .error)

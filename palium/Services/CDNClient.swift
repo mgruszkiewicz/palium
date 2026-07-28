@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 nonisolated enum CDNClient {
 
@@ -87,8 +88,23 @@ nonisolated enum CDNClient {
             version: version,
             platform: platformName,
             files: files,
-            totalSize: totalSize
+            totalSize: totalSize,
+            contentsHash: filesDigest(files)
         )
+    }
+
+    /// Digest over (path, size, hash) of every file, computed locally rather than trusting
+    /// the CDN's own "contents.hash" field, which can be absent/empty on a malformed manifest.
+    /// Sorted by path first since manifest tree-walk order isn't a guaranteed stable key.
+    private static func filesDigest(_ files: [ManifestFile]) -> Data {
+        var hasher = SHA256()
+        for file in files.sorted(by: { $0.path < $1.path }) {
+            hasher.update(data: Data(file.path.utf8))
+            var size = file.size
+            withUnsafeBytes(of: &size) { hasher.update(bufferPointer: $0) }
+            hasher.update(data: file.hash)
+        }
+        return Data(hasher.finalize())
     }
 
     private static func collectFiles(from node: FlexRef, into files: inout [ManifestFile]) {
