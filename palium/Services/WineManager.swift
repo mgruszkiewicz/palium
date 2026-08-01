@@ -36,12 +36,12 @@ nonisolated enum WineManager {
             guard let wineBinary = findWineBinary() else {
                 throw PaliumError.wineNotFound
             }
-            let gptkPrefix = gptkPrefixPath()
-            try await initializePrefix(wineBinary: wineBinary, at: gptkPrefix)
-            let username = try findWineUsername(in: gptkPrefix)
+            let prefix = gptkPrefix
+            try await initializePrefix(wineBinary: wineBinary, at: prefix)
+            let username = try findWineUsername(in: prefix)
             return WineInfo(
                 wineBinaryURL: wineBinary,
-                prefixPath: gptkPrefix,
+                prefixPath: prefix,
                 wineUsername: username,
                 source: .gptk
             )
@@ -52,20 +52,20 @@ nonisolated enum WineManager {
         guard let wineBinary = findGPTKBinary() else {
             throw PaliumError.wineNotFound
         }
-        let gptkPrefix = gptkPrefixPath()
-        if isPrefixValid(gptkPrefix), let username = try? findWineUsername(in: gptkPrefix) {
+        let prefix = gptkPrefix
+        if isPrefixValid(prefix), let username = try? findWineUsername(in: prefix) {
             return WineInfo(
                 wineBinaryURL: wineBinary,
-                prefixPath: gptkPrefix,
+                prefixPath: prefix,
                 wineUsername: username,
                 source: .gptk
             )
         }
-        try await initializePrefix(wineBinary: wineBinary, at: gptkPrefix)
-        let username = try findWineUsername(in: gptkPrefix)
+        try await initializePrefix(wineBinary: wineBinary, at: prefix)
+        let username = try findWineUsername(in: prefix)
         return WineInfo(
             wineBinaryURL: wineBinary,
-            prefixPath: gptkPrefix,
+            prefixPath: prefix,
             wineUsername: username,
             source: .gptk
         )
@@ -121,7 +121,9 @@ nonisolated enum WineManager {
 
     // MARK: - Prefix Management
 
-    private static func gptkPrefixPath() -> URL {
+    /// The prefix Palium manages itself (GPTK mode). Exposed so UI code
+    /// (e.g. Troubleshooting's "Delete Wine Prefix") uses the same path.
+    static var gptkPrefix: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(gptkPrefixRelativePath)
     }
@@ -168,7 +170,57 @@ nonisolated enum WineManager {
 
     // MARK: - Username Detection
 
+    /// The Wine user the game will actually run as.
+    ///
+    /// Wine stamps the running user's identity into `[Volatile Environment]` on every
+    /// wineboot, and that is what `%LOCALAPPDATA%` resolves to inside the prefix — so
+    /// it is authoritative in a way that listing `drive_c/users` is not. A prefix can
+    /// accumulate several user directories (GPTK is CrossOver-derived and runs as
+    /// `crossover`; other Wine builds use the macOS username), and `contentsOfDirectory`
+    /// returns them unordered — so scanning could pick a different user between runs and
+    /// silently split the game install from the save data the game writes.
     static func findWineUsername(in prefix: URL) throws -> String {
+        if let username = registryUsername(in: prefix) {
+            return username
+        }
+        return try scannedUsername(in: prefix)
+    }
+
+    /// Read `HKCU\Volatile Environment\USERNAME` out of the prefix's `user.reg`.
+    private static func registryUsername(in prefix: URL) -> String? {
+        let userReg = prefix.appendingPathComponent("user.reg")
+        guard let contents = try? String(contentsOf: userReg, encoding: .utf8) else {
+            return nil
+        }
+
+        let key = "\"USERNAME\"=\""
+        var inVolatileEnvironment = false
+
+        for rawLine in contents.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            // Section headers look like `[Volatile Environment] 1782835665`.
+            if line.hasPrefix("[") {
+                inVolatileEnvironment = line.hasPrefix("[Volatile Environment]")
+                continue
+            }
+
+            guard inVolatileEnvironment, line.hasPrefix(key), line.hasSuffix("\"") else {
+                continue
+            }
+
+            let username = line.dropFirst(key.count).dropLast()
+                .replacingOccurrences(of: "\\\\", with: "\\")
+                .replacingOccurrences(of: "\\\"", with: "\"")
+            return username.isEmpty ? nil : username
+        }
+
+        return nil
+    }
+
+    /// Fallback for prefixes with no usable `user.reg`: scan `drive_c/users`, preferring a
+    /// user that already holds a game install, then sorting so the result is at least stable.
+    private static func scannedUsername(in prefix: URL) throws -> String {
         let fm = FileManager.default
         let usersDir = prefix.appendingPathComponent("drive_c/users")
 
@@ -176,10 +228,25 @@ nonisolated enum WineManager {
             throw PaliumError.noBottleFound
         }
 
-        let users = try fm.contentsOfDirectory(atPath: usersDir.path)
-        let filtered = users.filter { $0 != "Public" && !$0.hasPrefix(".") && !$0.contains("Default") }
+        let candidates = try fm.contentsOfDirectory(atPath: usersDir.path)
+            .filter { $0 != "Public" && !$0.hasPrefix(".") && !$0.contains("Default") }
+            .filter { name in
+                var isDir: ObjCBool = false
+                let exists = fm.fileExists(
+                    atPath: usersDir.appendingPathComponent(name).path,
+                    isDirectory: &isDir
+                )
+                return exists && isDir.boolValue
+            }
+            .sorted()
 
-        guard let username = filtered.first else {
+        let withInstall = candidates.first { name in
+            let exe = usersDir
+                .appendingPathComponent("\(name)/AppData/Local/Palia/Client/PaliaClient.exe")
+            return fm.fileExists(atPath: exe.path)
+        }
+
+        guard let username = withInstall ?? candidates.first else {
             throw PaliumError.noBottleFound
         }
         return username
@@ -231,7 +298,23 @@ nonisolated enum WineManager {
 
             let didResume = OSAllocatedUnfairLock(initialState: false)
 
+            // Weak capture: don't keep the (finished) process alive until the
+            // timeout deadline; cancelled in the termination handler.
+            let timeoutWork = DispatchWorkItem { [weak process] in
+                let shouldResume = didResume.withLock { flag -> Bool in
+                    if flag { return false }
+                    flag = true
+                    return true
+                }
+                guard shouldResume else { return }
+                if let process, process.isRunning { process.terminate() }
+                continuation.resume(throwing: PaliumError.launchFailed(
+                    "Wine process timed out after \(Int(timeout))s"
+                ))
+            }
+
             process.terminationHandler = { proc in
+                timeoutWork.cancel()
                 let shouldResume = didResume.withLock { flag -> Bool in
                     if flag { return false }
                     flag = true
@@ -247,18 +330,7 @@ nonisolated enum WineManager {
                 }
             }
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
-                let shouldResume = didResume.withLock { flag -> Bool in
-                    if flag { return false }
-                    flag = true
-                    return true
-                }
-                guard shouldResume else { return }
-                if process.isRunning { process.terminate() }
-                continuation.resume(throwing: PaliumError.launchFailed(
-                    "Wine process timed out after \(Int(timeout))s"
-                ))
-            }
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: timeoutWork)
 
             do {
                 try process.run()
@@ -276,7 +348,8 @@ nonisolated enum WineManager {
 
     // MARK: - Diagnostics
 
-    struct DiagnosticResult: Sendable {
+    struct DiagnosticResult: Sendable, Identifiable {
+        var id: String { name }
         let name: String
         let passed: Bool
         let detail: String

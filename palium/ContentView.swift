@@ -234,9 +234,15 @@ struct ContentView: View {
             Text("Update Available")
                 .font(.headline)
 
-            Text("v\(appState.localGameVersion) → v\(appState.gameVersion)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            Group {
+                if appState.localGameVersion == appState.gameVersion {
+                    Text("New content available for v\(appState.gameVersion)")
+                } else {
+                    Text("v\(appState.localGameVersion) → v\(appState.gameVersion)")
+                }
+            }
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
 
             if let manifest = appState.manifest {
                 Text("\(manifest.files.count) files — only changed files will be downloaded")
@@ -415,9 +421,14 @@ struct ContentView: View {
             // Install VC++ runtime if not already present in prefix
             if !WineManager.isVCRuntimeInstalled(info: info) {
                 appState.statusMessage = "Installing VC++ runtime..."
+                appState.showDebugLog = true
                 appState.log("VC++ runtime not found in prefix, installing...")
                 do {
-                    try await WineManager.installVCRuntime(info: info)
+                    try await WineManager.installVCRuntime(info: info) { [appState] message, level in
+                        Task { @MainActor in
+                            appState.log(message, level: level)
+                        }
+                    }
                     appState.log("VC++ runtime installed", level: .success)
                 } catch {
                     appState.log("VC++ runtime install failed: \(error.localizedDescription) — game may still work", level: .warning)
@@ -473,19 +484,34 @@ struct ContentView: View {
             appState.log("Game found at \(info.gameInstallPath.path)", level: .success)
 
             let localVersion = LaunchSettings.shared.installedVersion
+            let localHash = LaunchSettings.shared.installedManifestHash
+            let cdnHash = appState.manifest?.contentsHash
+
             if let localVersion {
                 appState.localGameVersion = localVersion
                 appState.log("Installed version: \(localVersion)", level: .info)
 
-                if localVersion != appState.gameVersion {
-                    appState.log("Update available: \(localVersion) → \(appState.gameVersion)", level: .warning)
+                let versionChanged = localVersion != appState.gameVersion
+                // A stale hash always signals a real content change; a missing hash just
+                // means this build predates hash tracking — backfill it, don't force an update.
+                let contentChanged = localHash != nil && localHash != cdnHash
+
+                if versionChanged || contentChanged {
+                    let reason = versionChanged
+                        ? "\(localVersion) → \(appState.gameVersion)"
+                        : "content update for v\(appState.gameVersion)"
+                    appState.log("Update available: \(reason)", level: .warning)
                     appState.phase = .needsUpdate
                 } else {
+                    if localHash == nil {
+                        LaunchSettings.shared.installedManifestHash = cdnHash
+                    }
                     appState.phase = .ready
                 }
             } else {
                 appState.log("No stored version found — assuming up to date", level: .warning)
                 LaunchSettings.shared.installedVersion = appState.gameVersion
+                LaunchSettings.shared.installedManifestHash = cdnHash
                 appState.phase = .ready
             }
         } else {
@@ -519,6 +545,7 @@ struct ContentView: View {
                     installDirectory: info.gameInstallPath
                 )
                 LaunchSettings.shared.installedVersion = appState.gameVersion
+                LaunchSettings.shared.installedManifestHash = manifest.contentsHash
                 appState.phase = .ready
             } catch is CancellationError {
                 appState.log("Download cancelled", level: .warning)
@@ -550,21 +577,16 @@ struct ContentView: View {
         )
         appState.log("Launching game (DX11, Metal HUD: \(options.metalHUD ? "ON" : "OFF"))...")
         do {
-            let process = try GameLauncher.launch(info: info, options: options)
-            appState.gameProcess = process
-            appState.phase = .launching
-            appState.log("Game process started (PID: \(process.processIdentifier))", level: .success)
-
-            // Monitor process in background
-            Task.detached {
-                process.waitUntilExit()
-                let status = process.terminationStatus
-                await MainActor.run {
+            let process = try GameLauncher.launch(info: info, options: options) { [appState] status in
+                Task { @MainActor in
                     appState.log("Game exited with status \(status)", level: status == 0 ? .info : .warning)
                     appState.gameProcess = nil
                     appState.phase = .ready
                 }
             }
+            appState.gameProcess = process
+            appState.phase = .launching
+            appState.log("Game process started (PID: \(process.processIdentifier))", level: .success)
         } catch let error as PaliumError {
             appState.log("Launch failed: \(error.localizedDescription)", level: .error)
             appState.phase = .error(error)
@@ -596,6 +618,8 @@ struct ContentView: View {
 
         if corruptFiles.isEmpty {
             appState.statusMessage = "All files verified successfully"
+            LaunchSettings.shared.installedVersion = appState.gameVersion
+            LaunchSettings.shared.installedManifestHash = manifest.contentsHash
             appState.phase = .ready
             return
         }
@@ -613,6 +637,8 @@ struct ContentView: View {
                 version: appState.gameVersion,
                 installDirectory: info.gameInstallPath
             )
+            LaunchSettings.shared.installedVersion = appState.gameVersion
+            LaunchSettings.shared.installedManifestHash = manifest.contentsHash
             appState.phase = .ready
         } catch let error as PaliumError {
             appState.log("Repair failed: \(error.localizedDescription)", level: .error)

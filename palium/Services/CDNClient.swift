@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 nonisolated enum CDNClient {
 
@@ -62,17 +63,19 @@ nonisolated enum CDNClient {
     // MARK: - Manifest Parsing
 
     static func parseManifest(_ data: Data) throws -> UpdateManifest {
-        let root = try FlexBuffersParser.decode(data)
+        // Walk the manifest lazily: only the fields we keep are ever decoded,
+        // which avoids materializing the (large) per-chunk metadata.
+        let root = try FlexBuffersParser.root(data)
 
-        guard let rootMap = root.mapValue else {
+        guard root.isMap else {
             throw PaliumError.manifestParseFailed("Root is not a map")
         }
 
-        let bundleName = rootMap["bundle"]?.stringValue ?? ""
-        let version = rootMap["version"]?.stringValue ?? ""
-        let platformName = rootMap["platform"]?.stringValue ?? ""
+        let bundleName = root["bundle"]?.stringValue ?? ""
+        let version = root["version"]?.stringValue ?? ""
+        let platformName = root["platform"]?.stringValue ?? ""
 
-        guard let contents = rootMap["contents"]?.mapValue else {
+        guard let contents = root["contents"], contents.isMap else {
             throw PaliumError.manifestParseFailed("No 'contents' in manifest")
         }
 
@@ -85,37 +88,44 @@ nonisolated enum CDNClient {
             version: version,
             platform: platformName,
             files: files,
-            totalSize: totalSize
+            totalSize: totalSize,
+            contentsHash: filesDigest(files)
         )
     }
 
-    private static func collectFiles(from node: [String: FlexValue], into files: inout [ManifestFile]) {
-        guard let children = node["files"]?.vectorValue else { return }
+    /// Digest over (path, size, hash) of every file, computed locally rather than trusting
+    /// the CDN's own "contents.hash" field, which can be absent/empty on a malformed manifest.
+    /// Sorted by path first since manifest tree-walk order isn't a guaranteed stable key.
+    private static func filesDigest(_ files: [ManifestFile]) -> Data {
+        var hasher = SHA256()
+        for file in files.sorted(by: { $0.path < $1.path }) {
+            hasher.update(data: Data(file.path.utf8))
+            var size = file.size
+            withUnsafeBytes(of: &size) { hasher.update(bufferPointer: $0) }
+            hasher.update(data: file.hash)
+        }
+        return Data(hasher.finalize())
+    }
 
-        for child in children {
-            guard let childMap = child.mapValue else { continue }
-            let path = childMap["path"]?.stringValue ?? ""
-            let size = childMap["size"]?.uintValue ?? 0
-            let hash = childMap["hash"]?.blobValue ?? Data()
+    private static func collectFiles(from node: FlexRef, into files: inout [ManifestFile]) {
+        guard let children = node["files"], children.isVector else { return }
 
-            if let chunksVec = childMap["chunks"]?.vectorValue, !chunksVec.isEmpty {
-                // Leaf file with chunks
-                let chunks = chunksVec.compactMap { chunkVal -> ManifestChunk? in
-                    guard let arr = chunkVal.vectorValue, arr.count >= 3 else { return nil }
-                    return ManifestChunk(
-                        offset: arr[0].uintValue ?? 0,
-                        size: arr[1].uintValue ?? 0,
-                        hash: arr[2].blobValue ?? Data()
-                    )
-                }
-                files.append(ManifestFile(path: path, size: size, hash: hash, chunks: chunks))
-            } else if childMap["files"] != nil {
+        for i in 0..<children.count {
+            guard let child = children[i], child.isMap else { continue }
+
+            if child["files"] != nil {
                 // Directory — recurse
-                collectFiles(from: childMap, into: &files)
-            } else {
-                // File with no chunks (possibly empty)
-                files.append(ManifestFile(path: path, size: size, hash: hash, chunks: []))
+                collectFiles(from: child, into: &files)
+                continue
             }
+
+            // Leaf file. Per-chunk metadata is deliberately skipped: downloads
+            // and verification operate on whole files.
+            files.append(ManifestFile(
+                path: child["path"]?.stringValue ?? "",
+                size: child["size"]?.uintValue ?? 0,
+                hash: child["hash"]?.blobValue ?? Data()
+            ))
         }
     }
 }

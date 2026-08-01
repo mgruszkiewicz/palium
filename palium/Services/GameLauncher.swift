@@ -7,7 +7,13 @@ nonisolated enum GameLauncher {
         let useAllCores: Bool
     }
 
-    static func launch(info: WineInfo, options: LaunchOptions) throws -> Process {
+    /// Launch the game. `onExit` is installed before the process starts, so it
+    /// fires even if the game exits immediately.
+    static func launch(
+        info: WineInfo,
+        options: LaunchOptions,
+        onExit: @escaping @Sendable (Int32) -> Void = { _ in }
+    ) throws -> Process {
         let wineUser = info.wineUsername
 
         // Launch the actual game binary directly, NOT PaliaClient.exe (which is a
@@ -35,6 +41,7 @@ nonisolated enum GameLauncher {
         process.arguments = arguments
         process.environment = WineManager.makeWineEnvironment(info: info, metalHUD: options.metalHUD)
         process.currentDirectoryURL = info.gameInstallPath
+        process.terminationHandler = { onExit($0.terminationStatus) }
 
         try process.run()
         return process

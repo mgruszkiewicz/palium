@@ -24,10 +24,26 @@ class LaunchSettings {
     // Installed game version (persisted to detect updates)
     var installedVersion: String? { didSet { save() } }
 
+    // SHA-256 of the manifest's "contents" node at install time — catches
+    // content updates the CDN ships without bumping the channel version.
+    var installedManifestHash: Data? { didSet { save() } }
+
     private static let storageKey = "launchSettings_v2"
 
+    /// Suppresses the didSet-triggered save() while restoring persisted values —
+    /// property observers fire for assignments made during load.
+    @ObservationIgnored private var isLoaded = false
+
     private init() {
-        load()
+        if let data = UserDefaults.standard.data(forKey: Self.storageKey),
+           let stored = try? JSONDecoder().decode(StoredSettings.self, from: data) {
+            wineSource = stored.wineSource
+            metalHUD = stored.metalHUD
+            useAllCores = stored.useAllCores
+            installedVersion = stored.installedVersion
+            installedManifestHash = stored.installedManifestHash
+        }
+        isLoaded = true
     }
 
     private struct StoredSettings: Codable {
@@ -35,25 +51,17 @@ class LaunchSettings {
         var metalHUD: Bool = false
         var useAllCores: Bool = true
         var installedVersion: String?
-    }
-
-    private func load() {
-        guard let data = UserDefaults.standard.data(forKey: Self.storageKey),
-              let stored = try? JSONDecoder().decode(StoredSettings.self, from: data) else {
-            return
-        }
-        wineSource = stored.wineSource
-        metalHUD = stored.metalHUD
-        useAllCores = stored.useAllCores
-        installedVersion = stored.installedVersion
+        var installedManifestHash: Data?
     }
 
     private func save() {
+        guard isLoaded else { return }
         let stored = StoredSettings(
             wineSource: wineSource,
             metalHUD: metalHUD,
             useAllCores: useAllCores,
-            installedVersion: installedVersion
+            installedVersion: installedVersion,
+            installedManifestHash: installedManifestHash
         )
         if let data = try? JSONEncoder().encode(stored) {
             UserDefaults.standard.set(data, forKey: Self.storageKey)

@@ -74,6 +74,49 @@ struct FlexBuffersParserTests {
         #expect(result.uintValue == 1000)
     }
 
+    @Test func decodeMap() throws {
+        // {"a": 42} encoded by hand (all byte widths 1):
+        // key cstring, keys vector (len + offset), keys descriptor (offset + width),
+        // values vector (len + value), element types, root offset, type, width.
+        let data = Data([0x61, 0x00, 0x01, 0x03, 0x01, 0x01, 0x01, 42, 8, 0x02, 0x24, 0x01])
+        let result = try FlexBuffersParser.decode(data)
+        #expect(result["a"]?.uintValue == 42)
+
+        let root = try FlexBuffersParser.root(data)
+        #expect(root.isMap)
+        #expect(root.count == 1)
+        #expect(root.key(at: 0) == "a")
+        #expect(root["a"]?.uintValue == 42)
+        #expect(root["missing"] == nil)
+    }
+
+    @Test func decodeVector() throws {
+        // [1, 2] encoded by hand: len, values, element types, root offset, type, width
+        let data = Data([2, 1, 2, 8, 8, 4, 0x28, 1])
+        let result = try FlexBuffersParser.decode(data)
+        #expect(result[0]?.uintValue == 1)
+        #expect(result[1]?.uintValue == 2)
+        #expect(result[2] == nil)
+
+        let root = try FlexBuffersParser.root(data)
+        #expect(root.isVector)
+        #expect(root.count == 2)
+        #expect(root[1]?.uintValue == 2)
+    }
+
+    @Test func decodeMalformedBufferDoesNotCrash() throws {
+        // Garbage offsets and truncated buffers must degrade gracefully, not crash.
+        let buffers: [Data] = [
+            Data([0xFF, 0xFE, 0x24, 0x08]),             // map with nonsense offsets
+            Data([0xFF, 0xFF, 0xFF, 0x28, 0x08]),       // vector with absurd width
+            Data([0x00, 0x64, 0x01]),                    // blob pointing out of bounds
+            Data((0..<64).map { _ in UInt8.random(in: 0...255) } + [0x24, 0x01]),
+        ]
+        for data in buffers {
+            _ = try? FlexBuffersParser.decode(data)
+        }
+    }
+
     @Test func decodeString() throws {
         // FlexBuffers string: length-prefixed, null-terminated
         // "hi" = [2(len), 'h', 'i', 0, packed_type, byte_width]
@@ -200,15 +243,8 @@ struct CDNClientTests {
 struct ManifestModelTests {
 
     @Test func manifestFileIdentity() {
-        let file = ManifestFile(path: "test/file.exe", size: 1024, hash: Data(), chunks: [])
+        let file = ManifestFile(path: "test/file.exe", size: 1024, hash: Data())
         #expect(file.id == "test/file.exe")
-    }
-
-    @Test func manifestChunkProperties() {
-        let chunk = ManifestChunk(offset: 0, size: 512, hash: Data([0xAB, 0xCD]))
-        #expect(chunk.offset == 0)
-        #expect(chunk.size == 512)
-        #expect(chunk.hash.count == 2)
     }
 
     @Test func updateManifestTotalSize() {
@@ -217,10 +253,11 @@ struct ManifestModelTests {
             version: "1.0",
             platform: "windows",
             files: [
-                ManifestFile(path: "a.exe", size: 100, hash: Data(), chunks: []),
-                ManifestFile(path: "b.pak", size: 200, hash: Data(), chunks: []),
+                ManifestFile(path: "a.exe", size: 100, hash: Data()),
+                ManifestFile(path: "b.pak", size: 200, hash: Data()),
             ],
-            totalSize: 300
+            totalSize: 300,
+            contentsHash: Data()
         )
         #expect(manifest.files.count == 2)
         #expect(manifest.totalSize == 300)
@@ -430,6 +467,140 @@ struct WineManagerTests {
             source: .gptk
         )
         #expect(WineManager.isGameInstalled(info: info) == false)
+    }
+
+    // MARK: - Wine Username Detection
+
+    /// Build a throwaway prefix. `users` become directories under `drive_c/users`;
+    /// `registryUser`, when set, is written into `user.reg` as Wine's wineboot does.
+    private func makePrefix(
+        users: [String],
+        registryUser: String? = nil,
+        installedFor: String? = nil
+    ) throws -> URL {
+        let fm = FileManager.default
+        let prefix = fm.temporaryDirectory.appendingPathComponent("prefix_\(UUID())")
+        let usersDir = prefix.appendingPathComponent("drive_c/users")
+        for user in users {
+            try fm.createDirectory(
+                at: usersDir.appendingPathComponent(user),
+                withIntermediateDirectories: true
+            )
+        }
+        if let installedFor {
+            let clientDir = usersDir
+                .appendingPathComponent("\(installedFor)/AppData/Local/Palia/Client")
+            try fm.createDirectory(at: clientDir, withIntermediateDirectories: true)
+            try Data().write(to: clientDir.appendingPathComponent("PaliaClient.exe"))
+        }
+        if let registryUser {
+            let userReg = """
+            WINE REGISTRY Version 2
+
+            [Software\\\\Wine] 1782835665
+            "SomeKey"="SomeValue"
+
+            [Volatile Environment] 1782835665
+            #time=1dd08aa966aefd2
+            "HOMEPATH"="\\\\users\\\\\(registryUser)"
+            "USERNAME"="\(registryUser)"
+            "USERPROFILE"="C:\\\\users\\\\\(registryUser)"
+
+            """
+            try userReg.write(
+                to: prefix.appendingPathComponent("user.reg"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        return prefix
+    }
+
+    @Test func usernameComesFromRegistryNotDirectoryOrder() throws {
+        // GPTK runs the game as `crossover` regardless of which user directories
+        // happen to exist, and `user.reg` is what says so.
+        let prefix = try makePrefix(
+            users: ["alice", "crossover", "zoe"],
+            registryUser: "crossover"
+        )
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func registryUsernameWinsOverUserWithInstall() throws {
+        // The install may sit under a stale user; the game still reads and writes
+        // under whoever Wine actually runs as.
+        let prefix = try makePrefix(
+            users: ["crossover", "stale"],
+            registryUser: "crossover",
+            installedFor: "stale"
+        )
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func usernameIgnoresUnrelatedRegistrySections() throws {
+        // A `USERNAME` value outside [Volatile Environment] must not be picked up.
+        let prefix = try makePrefix(users: ["crossover"])
+        defer { try? FileManager.default.removeItem(at: prefix) }
+        let userReg = """
+        WINE REGISTRY Version 2
+
+        [Software\\\\Decoy] 1782835665
+        "USERNAME"="wrong"
+
+        """
+        try userReg.write(
+            to: prefix.appendingPathComponent("user.reg"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        // Falls through to the directory scan rather than trusting the decoy.
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func fallbackPrefersUserHoldingTheInstall() throws {
+        // No user.reg: the user that already has the game beats alphabetical order.
+        let prefix = try makePrefix(
+            users: ["aaa", "crossover"],
+            installedFor: "crossover"
+        )
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func fallbackIsStableWhenNothingIsInstalled() throws {
+        // Deterministic across runs even though contentsOfDirectory is unordered.
+        let prefix = try makePrefix(users: ["zoe", "alice", "crossover"])
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        let results = try (0..<5).map { _ in try WineManager.findWineUsername(in: prefix) }
+        #expect(results.allSatisfy { $0 == "alice" })
+    }
+
+    @Test func fallbackSkipsPublicAndDefaultAndFiles() throws {
+        let fm = FileManager.default
+        let prefix = try makePrefix(users: ["Public", "Default User", "crossover"])
+        defer { try? fm.removeItem(at: prefix) }
+        // A stray file must not be mistaken for a user directory.
+        try Data().write(
+            to: prefix.appendingPathComponent("drive_c/users/.DS_Store")
+        )
+
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func throwsWhenPrefixHasNoUsers() throws {
+        let prefix = try makePrefix(users: [])
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        #expect(throws: PaliumError.self) {
+            _ = try WineManager.findWineUsername(in: prefix)
+        }
     }
 }
 

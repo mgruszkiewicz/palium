@@ -78,7 +78,7 @@ struct TroubleshootingTab: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(results.enumerated()), id: \.offset) { _, result in
+                        ForEach(results) { result in
                             diagnosticRow(result)
                             Divider().padding(.leading, 28)
                         }
@@ -242,24 +242,24 @@ struct TroubleshootingTab: View {
     }
 
     private func deletePrefix() {
-        // Use the same prefix path as WineManager (gptkPrefixRelativePath)
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let prefix = home.appendingPathComponent("Library/Application Support/com.palium/prefix")
-        try? FileManager.default.removeItem(at: prefix)
-        // Also kill wineserver so it doesn't hold stale state
-        let binDir = (WineManager.findGPTKBinary() ?? WineManager.findWhiskyBinary())?.deletingLastPathComponent()
-        if let wineserver = binDir?.appendingPathComponent("wineserver") {
-            let p = Process()
-            p.executableURL = wineserver
-            p.arguments = ["-k"]
-            p.standardOutput = FileHandle.nullDevice
-            p.standardError = FileHandle.nullDevice
-            try? p.run()
-            p.waitUntilExit()
-        }
-
         results = []
         logEntries = []
         hasRun = false
+
+        // File removal and wineserver shutdown run off the main thread.
+        Task.detached(priority: .utility) {
+            try? FileManager.default.removeItem(at: WineManager.gptkPrefix)
+            // Also kill wineserver so it doesn't hold stale state
+            let binDir = (WineManager.findGPTKBinary() ?? WineManager.findWhiskyBinary())?.deletingLastPathComponent()
+            if let wineserver = binDir?.appendingPathComponent("wineserver") {
+                let p = Process()
+                p.executableURL = wineserver
+                p.arguments = ["-k"]
+                p.standardOutput = FileHandle.nullDevice
+                p.standardError = FileHandle.nullDevice
+                try? p.run()
+                p.waitUntilExit()
+            }
+        }
     }
 }
