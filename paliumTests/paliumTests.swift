@@ -468,6 +468,140 @@ struct WineManagerTests {
         )
         #expect(WineManager.isGameInstalled(info: info) == false)
     }
+
+    // MARK: - Wine Username Detection
+
+    /// Build a throwaway prefix. `users` become directories under `drive_c/users`;
+    /// `registryUser`, when set, is written into `user.reg` as Wine's wineboot does.
+    private func makePrefix(
+        users: [String],
+        registryUser: String? = nil,
+        installedFor: String? = nil
+    ) throws -> URL {
+        let fm = FileManager.default
+        let prefix = fm.temporaryDirectory.appendingPathComponent("prefix_\(UUID())")
+        let usersDir = prefix.appendingPathComponent("drive_c/users")
+        for user in users {
+            try fm.createDirectory(
+                at: usersDir.appendingPathComponent(user),
+                withIntermediateDirectories: true
+            )
+        }
+        if let installedFor {
+            let clientDir = usersDir
+                .appendingPathComponent("\(installedFor)/AppData/Local/Palia/Client")
+            try fm.createDirectory(at: clientDir, withIntermediateDirectories: true)
+            try Data().write(to: clientDir.appendingPathComponent("PaliaClient.exe"))
+        }
+        if let registryUser {
+            let userReg = """
+            WINE REGISTRY Version 2
+
+            [Software\\\\Wine] 1782835665
+            "SomeKey"="SomeValue"
+
+            [Volatile Environment] 1782835665
+            #time=1dd08aa966aefd2
+            "HOMEPATH"="\\\\users\\\\\(registryUser)"
+            "USERNAME"="\(registryUser)"
+            "USERPROFILE"="C:\\\\users\\\\\(registryUser)"
+
+            """
+            try userReg.write(
+                to: prefix.appendingPathComponent("user.reg"),
+                atomically: true,
+                encoding: .utf8
+            )
+        }
+        return prefix
+    }
+
+    @Test func usernameComesFromRegistryNotDirectoryOrder() throws {
+        // GPTK runs the game as `crossover` regardless of which user directories
+        // happen to exist, and `user.reg` is what says so.
+        let prefix = try makePrefix(
+            users: ["alice", "crossover", "zoe"],
+            registryUser: "crossover"
+        )
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func registryUsernameWinsOverUserWithInstall() throws {
+        // The install may sit under a stale user; the game still reads and writes
+        // under whoever Wine actually runs as.
+        let prefix = try makePrefix(
+            users: ["crossover", "stale"],
+            registryUser: "crossover",
+            installedFor: "stale"
+        )
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func usernameIgnoresUnrelatedRegistrySections() throws {
+        // A `USERNAME` value outside [Volatile Environment] must not be picked up.
+        let prefix = try makePrefix(users: ["crossover"])
+        defer { try? FileManager.default.removeItem(at: prefix) }
+        let userReg = """
+        WINE REGISTRY Version 2
+
+        [Software\\\\Decoy] 1782835665
+        "USERNAME"="wrong"
+
+        """
+        try userReg.write(
+            to: prefix.appendingPathComponent("user.reg"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        // Falls through to the directory scan rather than trusting the decoy.
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func fallbackPrefersUserHoldingTheInstall() throws {
+        // No user.reg: the user that already has the game beats alphabetical order.
+        let prefix = try makePrefix(
+            users: ["aaa", "crossover"],
+            installedFor: "crossover"
+        )
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func fallbackIsStableWhenNothingIsInstalled() throws {
+        // Deterministic across runs even though contentsOfDirectory is unordered.
+        let prefix = try makePrefix(users: ["zoe", "alice", "crossover"])
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        let results = try (0..<5).map { _ in try WineManager.findWineUsername(in: prefix) }
+        #expect(results.allSatisfy { $0 == "alice" })
+    }
+
+    @Test func fallbackSkipsPublicAndDefaultAndFiles() throws {
+        let fm = FileManager.default
+        let prefix = try makePrefix(users: ["Public", "Default User", "crossover"])
+        defer { try? fm.removeItem(at: prefix) }
+        // A stray file must not be mistaken for a user directory.
+        try Data().write(
+            to: prefix.appendingPathComponent("drive_c/users/.DS_Store")
+        )
+
+        #expect(try WineManager.findWineUsername(in: prefix) == "crossover")
+    }
+
+    @Test func throwsWhenPrefixHasNoUsers() throws {
+        let prefix = try makePrefix(users: [])
+        defer { try? FileManager.default.removeItem(at: prefix) }
+
+        #expect(throws: PaliumError.self) {
+            _ = try WineManager.findWineUsername(in: prefix)
+        }
+    }
 }
 
 // MARK: - AppState Tests
