@@ -1,0 +1,185 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  SPARKLE_VERSION: "2.9.4"
+  PAGES_BASE: https://mgruszkiewicz.github.io/palium
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the build number is the commit count, and it has to
+          # keep increasing or Sparkle will not treat the release as newer.
+          fetch-depth: 0
+
+      - name: Derive version
+        id: version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${TAG#v}"
+          BUILD="$(git rev-list --count HEAD)"
+          echo "tag=$TAG"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD"     >> "$GITHUB_OUTPUT"
+          echo "Releasing $VERSION (build $BUILD) from $TAG"
+
+      - name: Run tests
+        run: make test
+
+      - name: Build release artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          npm install --global create-dmg@8.1.0
+          make release-artifacts
+          mv Palium.zip "Palium-${VERSION}.zip"
+          mv Palium.dmg "Palium-${VERSION}.dmg"
+
+      - name: Verify built version matches the tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          PLIST=build/DerivedData/Build/Products/Release/palium.app/Contents/Info.plist
+          SHORT=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PLIST")
+          BUNDLE=$(/usr/libexec/PlistBuddy -c "Print CFBundleVersion" "$PLIST")
+          FEED=$(/usr/libexec/PlistBuddy -c "Print SUFeedURL" "$PLIST")
+          KEY=$(/usr/libexec/PlistBuddy -c "Print SUPublicEDKey" "$PLIST")
+          echo "built: $SHORT ($BUNDLE)  feed: $FEED"
+          [ "$SHORT" = "$VERSION" ] || { echo "::error::CFBundleShortVersionString $SHORT != $VERSION"; exit 1; }
+          [ "$BUNDLE" = "$BUILD" ]  || { echo "::error::CFBundleVersion $BUNDLE != $BUILD"; exit 1; }
+          [ -n "$FEED" ] && [ -n "$KEY" ] || { echo "::error::SUFeedURL/SUPublicEDKey missing from the built app"; exit 1; }
+
+      - name: Install Sparkle tools
+        run: |
+          curl -sSL -o sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+          mkdir -p sparkle && tar -xJf sparkle.tar.xz -C sparkle
+
+      - name: Sign update with EdDSA key
+        id: sign
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY" ]; then
+            echo "::error::SPARKLE_PRIVATE_KEY secret is not set"; exit 1
+          fi
+          ARCHIVE="Palium-${VERSION}.zip"
+          # Piped via stdin so the key never touches the runner's disk.
+          SIGNATURE=$(printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | ./sparkle/bin/sign_update "$ARCHIVE" --ed-key-file - -p)
+          printf '%s' "$SPARKLE_PRIVATE_KEY" \
+            | ./sparkle/bin/sign_update "$ARCHIVE" --verify "$SIGNATURE" --ed-key-file -
+          echo "::add-mask::$SIGNATURE"
+          echo "signature=$SIGNATURE" >> "$GITHUB_OUTPUT"
+          echo "length=$(stat -f%z "$ARCHIVE")" >> "$GITHUB_OUTPUT"
+
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            Palium-${{ steps.version.outputs.version }}.zip
+            Palium-${{ steps.version.outputs.version }}.dmg
+
+      # The appcast points at these assets, so they must exist before it is published.
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --title "Palium $VERSION" \
+            --generate-notes \
+            "Palium-${VERSION}.dmg" \
+            "Palium-${VERSION}.zip"
+
+      - name: Publish appcast to GitHub Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ steps.version.outputs.build }}
+          SIGNATURE: ${{ steps.sign.outputs.signature }}
+          LENGTH: ${{ steps.sign.outputs.length }}
+        run: |
+          MIN_OS=$(xcodebuild -project palium.xcodeproj -scheme palium -configuration Release \
+            -showBuildSettings 2>/dev/null \
+            | awk -F' = ' '/ MACOSX_DEPLOYMENT_TARGET =/ {print $2; exit}')
+
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if ! git clone --branch gh-pages --depth 1 "$REPO_URL" site 2>/dev/null; then
+            echo "gh-pages does not exist yet — creating it"
+            rm -rf site
+            git clone --depth 1 "$REPO_URL" site
+            git -C site checkout --orphan gh-pages
+            git -C site rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          # Sparkle renders these notes in the update prompt.
+          mkdir -p site/notes
+          gh release view "$TAG" --json body --jq .body > notes.md
+          [ -s notes.md ] || echo "See the release page for details." > notes.md
+          gh api -X POST /markdown \
+            -f mode=gfm \
+            -f context="$GITHUB_REPOSITORY" \
+            -f text="$(cat notes.md)" > notes-body.html
+          {
+            echo '<!DOCTYPE html><html><head><meta charset="utf-8">'
+            echo '<style>body{font:13px -apple-system,sans-serif;margin:0;padding:8px;color:#111}'
+            echo '@media (prefers-color-scheme:dark){body{background:#1e1e1e;color:#eee}}'
+            echo 'h1,h2,h3{font-size:1.05em;margin:.8em 0 .3em}code,pre{font-family:ui-monospace,monospace}</style>'
+            echo "</head><body><h1>Palium ${VERSION}</h1>"
+            cat notes-body.html
+            echo '</body></html>'
+          } > "site/notes/${VERSION}.html"
+
+          python3 scripts/appcast.py site/appcast.xml \
+            --version "$BUILD" \
+            --short-version "$VERSION" \
+            --url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Palium-${VERSION}.zip" \
+            --length "$LENGTH" \
+            --signature "$SIGNATURE" \
+            --minimum-system-version "$MIN_OS" \
+            --release-notes-url "${PAGES_BASE}/notes/${VERSION}.html" \
+            --full-release-notes-url "https://github.com/${GITHUB_REPOSITORY}/releases" \
+            --channel-link "${PAGES_BASE}/appcast.xml"
+
+          # Stops Pages from running the output through Jekyll.
+          touch site/.nojekyll
+
+          cd site
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "appcast unchanged — nothing to publish"
+          else
+            git commit -m "release: Palium ${VERSION} (build ${BUILD})"
+            git push origin gh-pages
+          fi
+
+      - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD: ${{ steps.version.outputs.build }}
+        run: |
+          {
+            echo "### Palium $VERSION (build $BUILD) published"
+            echo ""
+            echo "- Appcast: ${PAGES_BASE}/appcast.xml"
+            echo "- Existing installs pick it up within 24h, or immediately via *Check for Updates…*"
+          } >> "$GITHUB_STEP_SUMMARY"

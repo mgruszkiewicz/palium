@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		2BE05DF3301E19B400689E8C /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = 2BE05DF4301E19B400689E8C /* Sparkle */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		2B4967DD2F6317F4002536F0 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -29,9 +33,22 @@
 		2B4967E62F6317F4002536F0 /* paliumUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = paliumUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		2BE05DF4301E644200689E8C /* Exceptions for "palium" folder in "palium" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 2B4967CE2F6317F3002536F0 /* palium */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		2B4967D12F6317F3002536F0 /* palium */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				2BE05DF4301E644200689E8C /* Exceptions for "palium" folder in "palium" target */,
+			);
 			path = palium;
 			sourceTree = "<group>";
 		};
@@ -52,6 +69,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				2BE05DF3301E19B400689E8C /* Sparkle in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +130,7 @@
 			);
 			name = palium;
 			packageProductDependencies = (
+				2BE05DF4301E19B400689E8C /* Sparkle */,
 			);
 			productName = palium;
 			productReference = 2B4967CF2F6317F3002536F0 /* palium.app */;
@@ -195,6 +214,9 @@
 			);
 			mainGroup = 2B4967C62F6317F3002536F0;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				2BE05DF2301E19B400689E8C /* XCRemoteSwiftPackageReference "Sparkle" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 2B4967D02F6317F3002536F0 /* Products */;
 			projectDirPath = "";
@@ -404,6 +426,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = palium/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -437,6 +460,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = palium/Info.plist;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -575,6 +599,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		2BE05DF2301E19B400689E8C /* XCRemoteSwiftPackageReference "Sparkle" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/sparkle-project/Sparkle";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.9.4;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		2BE05DF4301E19B400689E8C /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 2BE05DF2301E19B400689E8C /* XCRemoteSwiftPackageReference "Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 2B4967C72F6317F3002536F0 /* Project object */;
 }

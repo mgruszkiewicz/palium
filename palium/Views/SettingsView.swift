@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsView: View {
     @Bindable private var settings = LaunchSettings.shared
+    @Bindable private var updater = UpdaterService.shared
 
     var body: some View {
         TabView {
@@ -20,12 +21,55 @@ struct SettingsView: View {
                     Label("Performance", systemImage: "gauge.with.dots.needle.67percent")
                 }
 
+            updatesTab
+                .tabItem {
+                    Label("Updates", systemImage: "arrow.down.circle")
+                }
+
             TroubleshootingTab()
                 .tabItem {
                     Label("Troubleshoot", systemImage: "wrench.and.screwdriver")
                 }
         }
         .frame(width: 500, height: 380)
+    }
+
+    // MARK: - Updates Tab
+
+    private var updatesTab: some View {
+        Form {
+            Toggle("Check for updates automatically", isOn: $updater.automaticallyChecksForUpdates)
+            Text("Palium checks for a new version once a day and asks before installing anything.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Divider()
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Current version \(appVersion)")
+                        .font(.caption)
+                    if let last = updater.lastUpdateCheckDate {
+                        Text("Last checked \(last.formatted(.relative(presentation: .named)))")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
+                Spacer()
+                Button("Check Now") {
+                    updater.checkForUpdates()
+                }
+                .disabled(!updater.canCheckForUpdates)
+            }
+        }
+        .formStyle(.grouped)
+    }
+
+    private var appVersion: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "\(short) (\(build))"
     }
 
     // MARK: - Wine Tab

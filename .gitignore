@@ -29,3 +29,6 @@ Carthage/
 *.lock
 
 *.dmg
+
+# Sparkle update archive built by `make zip-app`
+/Palium.zip

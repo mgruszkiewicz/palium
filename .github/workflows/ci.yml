@@ -39,6 +39,6 @@ jobs:
           path: Palium.dmg
 
       - name: Generate artifact attestation
-        uses: actions/attest@v4
+        uses: actions/attest-build-provenance@v2
         with:
-          subject-path: palium.dmg
+          subject-path: Palium.dmg
