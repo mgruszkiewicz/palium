@@ -15,7 +15,7 @@ jobs:
   test:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Run tests
         run: make test
@@ -24,7 +24,7 @@ jobs:
     runs-on: macos-latest
     needs: test
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Build (unsigned)
         run: make build-unsigned
@@ -33,12 +33,12 @@ jobs:
         run: npm install --global create-dmg@8.1.0 && make dmg
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Palium.dmg
           path: Palium.dmg
 
       - name: Generate artifact attestation
-        uses: actions/attest@v4
+        uses: actions/attest-build-provenance@v2
         with:
-          subject-path: palium.dmg
+          subject-path: Palium.dmg

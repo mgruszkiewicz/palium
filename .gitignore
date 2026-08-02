@@ -7,7 +7,9 @@
 *.mode2v3
 *.perspectivev3
 *.xcuserstate
-project.xcworkspace/
+# project.xcworkspace/ is deliberately not ignored: it holds Package.resolved,
+# which pins Sparkle to an exact revision for release builds. The xcuserdata/
+# rule below still covers the per-user noise inside it.
 xcuserdata/
 
 # Generated files
@@ -29,3 +31,6 @@ Carthage/
 *.lock
 
 *.dmg
+
+# Sparkle update archive built by `make zip-app`
+/Palium.zip
