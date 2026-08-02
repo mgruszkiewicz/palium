@@ -17,7 +17,7 @@ jobs:
   release:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           # Full history: the build number is the commit count, and it has to
           # keep increasing or Sparkle will not treat the release as newer.
