@@ -107,6 +107,20 @@ VERSION=0.0.1 BUILD=1 make build-unsigned
 open build/DerivedData/Build/Products/Release/palium.app
 ```
 
+## Bumping Sparkle
+
+`Package.resolved` is committed and release builds pass
+`-onlyUsePackageVersionsFromResolvedFile`, so they use exactly the revision
+recorded there rather than whatever the `upToNextMajorVersion` requirement
+currently allows. A release therefore ships the Sparkle you tested, not a newer
+one that landed in between.
+
+To move to a new version: bump it in Xcode (File ▸ Packages ▸ Update to Latest
+Package Versions), commit the changed `Package.resolved`, and bump
+`SPARKLE_VERSION` in `.github/workflows/release.yml` so the `sign_update` binary
+matches the framework. If those two drift apart the build fails loudly rather
+than shipping a mismatch.
+
 ## Code signing
 
 Palium currently ships ad-hoc signed and un-notarized. Sparkle is fine with this —

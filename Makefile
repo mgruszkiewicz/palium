@@ -18,6 +18,11 @@ BUILD   ?= $(shell git rev-list --count HEAD 2>/dev/null)
 VERSION_FLAGS := $(if $(VERSION),MARKETING_VERSION=$(VERSION)) \
                  $(if $(BUILD),CURRENT_PROJECT_VERSION=$(BUILD))
 
+# Shippable builds use exactly the Sparkle revision in Package.resolved. Without
+# this, the upToNextMajorVersion requirement lets a release silently pick up a
+# newer Sparkle than the one that was tested. Bump it via Xcode, not by drifting.
+PIN_PACKAGES := -onlyUsePackageVersionsFromResolvedFile
+
 .PHONY: archive zip clean test test-all build-unsigned dmg zip-app release-artifacts version
 
 version:
@@ -28,6 +33,7 @@ archive:
 		-scheme $(SCHEME) \
 		-configuration $(CONFIG) \
 		-archivePath $(ARCHIVE) \
+		$(PIN_PACKAGES) \
 		$(VERSION_FLAGS) \
 		archive
 
@@ -41,6 +47,7 @@ build-unsigned:
 		-configuration $(CONFIG) \
 		-derivedDataPath $(BUILD_DIR)/DerivedData \
 		CODE_SIGN_IDENTITY=- \
+		$(PIN_PACKAGES) \
 		$(VERSION_FLAGS) \
 		build
 
