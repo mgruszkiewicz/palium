@@ -1,0 +1,19 @@
+<?xml version='1.0' encoding='utf-8'?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>Palium</title>
+        <link>https://mgruszkiewicz.github.io/palium/appcast.xml</link>
+        <description>Most recent Palium releases</description>
+        <language>en</language>
+        <item>
+            <title>Version 1.1.0</title>
+            <sparkle:version>10</sparkle:version>
+            <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.7</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://mgruszkiewicz.github.io/palium/notes/1.1.0.html</sparkle:releaseNotesLink>
+            <sparkle:fullReleaseNotesLink>https://github.com/mgruszkiewicz/palium/releases</sparkle:fullReleaseNotesLink>
+            <pubDate>Sun, 02 Aug 2026 07:58:32 +0000</pubDate>
+            <enclosure url="https://github.com/mgruszkiewicz/palium/releases/download/v1.1.0/Palium-1.1.0.zip" sparkle:edSignature="MnyNy2Mxq74HX0bS6bvjGf7U4ZEXLpSAruQwEazC5CCCLl1L4FhRJch6yZSQD765IkMiETFZ6yXhrlVCOkqMBA==" length="1411935" type="application/octet-stream" />
+        </item>
+    </channel>
+</rss>
