@@ -83,6 +83,9 @@ struct ContentView: View {
         }
         .task {
             if applyUITestOverrides() { return }
+            // Unit tests use the app as their host: never download, create prefixes
+            // or move the user's game from a test run.
+            if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil { return }
             await checkRequirements()
         }
         .alert("Game Porting Toolkit Not Installed", isPresented: $showGPTKInstallAlert) {
@@ -96,7 +99,7 @@ struct ContentView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Game Porting Toolkit is required to run Palia on macOS.\n\nDownload GPTK from \(PaliumError.gptkReleasePage) and move it to Applications directory.\n\nAfter installing, click Retry.")
+            Text("Palium uses Apple's D3DMetal from Game Porting Toolkit to run Palia's graphics.\n\nDownload GPTK from \(PaliumError.gptkReleasePage) and move it to Applications directory.\n\nAfter installing, click Retry.")
         }
     }
 
@@ -355,14 +358,16 @@ struct ContentView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
 
-            // Wine source info
-            if let info = appState.wineInfo {
+            // Wine info
+            if appState.wineInfo != nil {
                 HStack(spacing: 4) {
-                    Image(systemName: info.source == .gptk ? "cup.and.saucer" : "wineglass")
+                    Image(systemName: "cup.and.saucer")
                         .font(.system(size: 9))
-                    Text(info.source.rawValue)
-                    Text("—")
-                    Text(info.wineBinaryURL.path)
+                    Text(WineEngine.current.displayName)
+                    if let version = appState.d3dMetalVersion {
+                        Text("·")
+                        Text("D3DMetal \(version)")
+                    }
                 }
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
@@ -408,13 +413,17 @@ struct ContentView: View {
         appState.statusMessage = "Checking system requirements..."
         appState.log("Checking system requirements...")
 
-        // Detect Wine environment (GPTK2 or Whisky)
+        // Wine engine, D3DMetal and prefix; moves an existing game from the old prefix.
         do {
-            appState.statusMessage = "Detecting Wine environment..."
-            let info = try await WineManager.detect(preferredSource: LaunchSettings.shared.wineSource)
+            appState.statusMessage = "Preparing Wine..."
+            let prepared = try await WineManager.prepare(
+                onStatus: { [appState] status in appState.statusMessage = status },
+                onLog: { [appState] message, level in appState.log(message, level: level) }
+            )
+            let info = prepared.info
             appState.wineInfo = info
-            appState.log("Wine detected via \(info.source.rawValue)", level: .success)
-            appState.log("Wine binary: \(info.wineBinaryURL.path)", level: .info)
+            appState.d3dMetalVersion = prepared.d3dMetal.version
+            appState.log("Wine: \(WineEngine.current.displayName)", level: .success)
             appState.log("Prefix: \(info.prefixPath.path)", level: .info)
             appState.log("Wine user: \(info.wineUsername)", level: .info)
 
@@ -437,9 +446,13 @@ struct ContentView: View {
                 appState.log("VC++ runtime already installed", level: .info)
             }
         } catch let error as PaliumError where error.isWineNotFound {
-            appState.log("Wine not found", level: .error)
+            appState.log("Game Porting Toolkit not found", level: .error)
             showGPTKInstallAlert = true
             appState.phase = .needsSetup(error)
+            return
+        } catch let error as PrefixMigration.Failure {
+            appState.log("Moving the game failed: \(error.localizedDescription)", level: .error)
+            appState.phase = .needsSetup(.migrationFailed(error.localizedDescription))
             return
         } catch let error as PaliumError {
             appState.log("Setup failed: \(error.localizedDescription)", level: .error)
@@ -447,7 +460,7 @@ struct ContentView: View {
             return
         } catch {
             appState.log("Setup failed: \(error.localizedDescription)", level: .error)
-            appState.phase = .needsSetup(.wineNotFound)
+            appState.phase = .needsSetup(.setupFailed(error.localizedDescription))
             return
         }
 
@@ -482,6 +495,28 @@ struct ContentView: View {
         // Check if game is already installed
         if let info = appState.wineInfo, WineManager.isGameInstalled(info: info) {
             appState.log("Game found at \(info.gameInstallPath.path)", level: .success)
+
+            // After the game was moved from the old prefix, check every file is there with
+            // the right size (no hashing, so it takes seconds). The journal keeps asking
+            // until a check, repair or download has actually run, so a failed start
+            // (offline, say) can't skip it.
+            if PrefixMigration.needsPostMoveCheck(), let manifest = appState.manifest {
+                let mismatched = DownloadManager.sizeMismatches(
+                    manifest: manifest, installDirectory: info.gameInstallPath
+                )
+                let installed = LaunchSettings.shared.installedVersion
+                if mismatched.isEmpty {
+                    appState.log("All \(manifest.files.count) game files present after the move", level: .success)
+                    PrefixMigration.markPostMoveChecked()
+                } else if installed == nil || installed == appState.gameVersion {
+                    appState.log("\(mismatched.count) files missing or different after the move, repairing them", level: .warning)
+                    await repair(files: mismatched, manifest: manifest, info: info)
+                    return
+                } else {
+                    // A game update is due anyway; its download replaces these files too.
+                    appState.log("\(mismatched.count) files missing or different after the move; the game update will download them", level: .warning)
+                }
+            }
 
             let localVersion = LaunchSettings.shared.installedVersion
             let localHash = LaunchSettings.shared.installedManifestHash
@@ -546,6 +581,7 @@ struct ContentView: View {
                 )
                 LaunchSettings.shared.installedVersion = appState.gameVersion
                 LaunchSettings.shared.installedManifestHash = manifest.contentsHash
+                PrefixMigration.markPostMoveChecked()
                 appState.phase = .ready
             } catch is CancellationError {
                 appState.log("Download cancelled", level: .warning)
@@ -573,9 +609,10 @@ struct ContentView: View {
         let settings = LaunchSettings.shared
         let options = GameLauncher.LaunchOptions(
             metalHUD: settings.metalHUD,
+            graphicsAPI: settings.graphicsAPI,
             useAllCores: settings.useAllCores
         )
-        appState.log("Launching game (DX11, Metal HUD: \(options.metalHUD ? "ON" : "OFF"))...")
+        appState.log("Launching game (\(options.graphicsAPI.rawValue), Metal HUD: \(options.metalHUD ? "ON" : "OFF"))...")
         do {
             let process = try GameLauncher.launch(info: info, options: options) { [appState] status in
                 Task { @MainActor in
@@ -620,12 +657,18 @@ struct ContentView: View {
             appState.statusMessage = "All files verified successfully"
             LaunchSettings.shared.installedVersion = appState.gameVersion
             LaunchSettings.shared.installedManifestHash = manifest.contentsHash
+            PrefixMigration.markPostMoveChecked()
             appState.phase = .ready
             return
         }
 
-        // Repair corrupt/missing files
+        await repair(files: corruptFiles, manifest: manifest, info: info)
+    }
+
+    /// Download `files` again and mark the install current.
+    private func repair(files: [ManifestFile], manifest: UpdateManifest, info: WineInfo) async {
         appState.phase = .repairing
+        appState.showDebugLog = true
         appState.downloadProgress = 0
         appState.resetSpeed()
 
@@ -633,12 +676,13 @@ struct ContentView: View {
 
         do {
             try await repairManager.repairFiles(
-                files: corruptFiles,
+                files: files,
                 version: appState.gameVersion,
                 installDirectory: info.gameInstallPath
             )
             LaunchSettings.shared.installedVersion = appState.gameVersion
             LaunchSettings.shared.installedManifestHash = manifest.contentsHash
+            PrefixMigration.markPostMoveChecked()
             appState.phase = .ready
         } catch let error as PaliumError {
             appState.log("Repair failed: \(error.localizedDescription)", level: .error)

@@ -53,6 +53,7 @@ class AppState {
 
     // Discovered state
     var wineInfo: WineInfo?
+    var d3dMetalVersion: String?
     var manifest: UpdateManifest?
     var gameVersion: String = ""
     var localGameVersion: String = ""

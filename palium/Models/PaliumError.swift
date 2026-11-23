@@ -12,7 +12,11 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
     case launchFailed(String)
     case cdnError(String)
     case prefixInitFailed(String)
-    
+    case engineInstallFailed(String)
+    case migrationFailed(String)
+    case setupFailed(String)
+    case oldPrefixHasGame(String)
+
 
     var isWineNotFound: Bool {
         if case .wineNotFound = self { return true }
@@ -22,7 +26,7 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
     var errorDescription: String? {
         switch self {
         case .wineNotFound:
-            return "Wine not found. Install Game Porting Toolkit 2+ from \(Self.gptkReleasePage)"
+            return "Game Porting Toolkit not found. Palium uses its D3DMetal: install it from \(Self.gptkReleasePage)"
         case .noBottleFound:
             return "No Wine prefix found. The app will create one automatically — please retry"
         case .gameNotInstalled:
@@ -39,6 +43,14 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
             return "CDN error: \(message)"
         case .prefixInitFailed(let reason):
             return "Failed to initialize Wine prefix: \(reason)"
+        case .engineInstallFailed(let reason):
+            return "Couldn't install the Wine engine: \(reason)"
+        case .migrationFailed(let reason):
+            return reason
+        case .setupFailed(let reason):
+            return "Setup failed: \(reason)"
+        case .oldPrefixHasGame(let path):
+            return "The old GPTK prefix still holds a game install (\(path)), so it was not removed."
         }
     }
 }

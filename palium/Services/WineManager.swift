@@ -3,169 +3,213 @@ import os
 
 nonisolated enum WineManager {
 
-    private static let gptkPrefixRelativePath = "Library/Application Support/com.palium/prefix"
-
-    // GPTK paths
-    static let gptkCandidatePaths = [
-        "/opt/homebrew/bin/wine64",
-        "/usr/local/bin/wine64",
-        "/Applications/Game Porting Toolkit.app/Contents/Resources/wine/bin/wine64",
-    ]
-
-    // Whisky paths
-    private static let whiskyAppPath = "/Applications/Whisky.app"
-    private static let whiskyWineRelativePath = "Library/Application Support/com.isaacmarovitz.Whisky/Libraries/Wine/bin/wine64"
-    private static let whiskyBottlesRelativePath = "Library/Containers/com.isaacmarovitz.Whisky/Bottles"
-
-    // MARK: - Detection
-
-    /// Detect a usable Wine environment, respecting the user's source preference.
-    static func detect(preferredSource: LaunchSettings.WineSource = .auto) async throws -> WineInfo {
-        switch preferredSource {
-        case .gptk:
-            return try await detectGPTK()
-        case .whisky:
-            return try detectWhisky()
-        case .auto:
-            if let result = try? await detectGPTK() {
-                return result
-            }
-            if let result = try? detectWhisky() {
-                return result
-            }
-            guard let wineBinary = findWineBinary() else {
-                throw PaliumError.wineNotFound
-            }
-            let prefix = gptkPrefix
-            try await initializePrefix(wineBinary: wineBinary, at: prefix)
-            let username = try findWineUsername(in: prefix)
-            return WineInfo(
-                wineBinaryURL: wineBinary,
-                prefixPath: prefix,
-                wineUsername: username,
-                source: .gptk
-            )
-        }
+    /// Palium's Wine 11 prefix. The old GPTK prefix (`prefix`) is only read by
+    /// `PrefixMigration`, to move an existing game out of it.
+    static var prefix: URL {
+        WineEngine.supportDirectory.appendingPathComponent("prefix-w11")
     }
 
-    private static func detectGPTK() async throws -> WineInfo {
-        guard let wineBinary = findGPTKBinary() else {
+    // MARK: - Preparing the environment
+
+    struct PreparedEnvironment: Sendable {
+        let info: WineInfo
+        let d3dMetal: D3DMetal.Source
+        let migration: PrefixMigration.Outcome
+    }
+
+    /// Everything needed before the game can run: D3DMetal from GPTK, the Wine
+    /// engine, the prefix, and moving an existing game over from the old prefix.
+    ///
+    /// The callbacks run on the main actor and are awaited, so status and log lines
+    /// arrive in order and never after this function has returned. Every failure is
+    /// a `PaliumError` (or `PrefixMigration.Failure`) that names what went wrong.
+    static func prepare(
+        onStatus: @escaping @MainActor @Sendable (String) -> Void = { _ in },
+        onLog: @escaping WineEngine.Log = { _, _ in }
+    ) async throws -> PreparedEnvironment {
+        await onStatus("Looking for Game Porting Toolkit...")
+        guard let source = D3DMetal.findSource() else {
             throw PaliumError.wineNotFound
         }
-        let prefix = gptkPrefix
-        if isPrefixValid(prefix), let username = try? findWineUsername(in: prefix) {
-            return WineInfo(
-                wineBinaryURL: wineBinary,
-                prefixPath: prefix,
-                wineUsername: username,
-                source: .gptk
-            )
+        do {
+            try D3DMetal.prepare(source: source)
+        } catch {
+            throw PaliumError.setupFailed("couldn't link D3DMetal from Game Porting Toolkit: \(error.localizedDescription)")
         }
-        try await initializePrefix(wineBinary: wineBinary, at: prefix)
+        await onLog("D3DMetal \(source.version ?? "(unknown version)") from \(source.lib.path)", .info)
+
+        if !WineEngine.isInstalled() {
+            await onStatus("Downloading the Wine engine...")
+        }
+        do {
+            try await WineEngine.ensureInstalled(onLog: onLog)
+        } catch let error as PaliumError {
+            throw error
+        } catch {
+            throw PaliumError.engineInstallFailed(error.localizedDescription)
+        }
+
+        if !isPrefixValid(prefix) {
+            await onStatus("Creating the Wine prefix...")
+            await onLog("Creating Wine prefix at \(prefix.path)...", .info)
+            try await createPrefix(at: prefix, onLog: onLog)
+            await onLog("Wine prefix created", .success)
+        }
         let username = try findWineUsername(in: prefix)
-        return WineInfo(
-            wineBinaryURL: wineBinary,
+
+        await onStatus("Checking for an existing game install...")
+        // The migration is synchronous; collect its log lines and pass them on in order.
+        var migrationLog: [(String, LogEntry.Level)] = []
+        let outcome: PrefixMigration.Outcome
+        do {
+            outcome = try PrefixMigration.run(
+                newPrefix: prefix,
+                newUser: username,
+                isGameRunning: isPaliaRunning,
+                stopLegacyWine: { stopLegacyWineserver(gptkLib: source.lib) },
+                onLog: { migrationLog.append(($0, $1)) }
+            )
+        } catch let error as PrefixMigration.Failure {
+            for (message, level) in migrationLog { await onLog(message, level) }
+            throw error
+        } catch {
+            for (message, level) in migrationLog { await onLog(message, level) }
+            throw PaliumError.migrationFailed(
+                "Moving the game to the new Wine prefix failed: \(error.localizedDescription). The game was left where it was."
+            )
+        }
+        for (message, level) in migrationLog { await onLog(message, level) }
+
+        let info = WineInfo(
+            wineBinaryURL: WineEngine.wineBinary,
             prefixPath: prefix,
-            wineUsername: username,
-            source: .gptk
+            wineUsername: username
         )
+        return PreparedEnvironment(info: info, d3dMetal: source, migration: outcome)
     }
 
-    private static func detectWhisky() throws -> WineInfo {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let whiskyWine = home.appendingPathComponent(whiskyWineRelativePath)
-        guard FileManager.default.fileExists(atPath: whiskyWine.path) else {
-            throw PaliumError.wineNotFound
-        }
-        guard let whiskyResult = findWhiskyBottle() else {
-            throw PaliumError.noBottleFound
-        }
-        return WineInfo(
-            wineBinaryURL: whiskyWine,
-            prefixPath: whiskyResult.bottle,
-            wineUsername: whiskyResult.username,
-            source: .whisky
-        )
-    }
-
-    // MARK: - Wine Binary Detection
-
-    static func findWineBinary() -> URL? {
-        if let gptk = findGPTKBinary() { return gptk }
-        if let whisky = findWhiskyBinary() { return whisky }
-        return nil
-    }
-
-    static func findGPTKBinary() -> URL? {
-        for path in gptkCandidatePaths {
-            if FileManager.default.fileExists(atPath: path) {
-                return URL(fileURLWithPath: path)
-            }
-        }
-        return nil
-    }
-
-    static func findWhiskyBinary() -> URL? {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let path = home.appendingPathComponent(whiskyWineRelativePath)
-        return FileManager.default.fileExists(atPath: path.path) ? path : nil
-    }
-
-    static var isGPTKInstalled: Bool {
-        gptkCandidatePaths.contains { FileManager.default.fileExists(atPath: $0) }
-    }
-
-    static var isWhiskyInstalled: Bool {
-        FileManager.default.fileExists(atPath: whiskyAppPath)
+    /// The existing setup, without downloading, creating or moving anything.
+    static func currentInfo() -> WineInfo? {
+        guard isPrefixValid(prefix), let user = try? findWineUsername(in: prefix) else { return nil }
+        return WineInfo(wineBinaryURL: WineEngine.wineBinary, prefixPath: prefix, wineUsername: user)
     }
 
     // MARK: - Prefix Management
 
-    /// The prefix Palium manages itself (GPTK mode). Exposed so UI code
-    /// (e.g. Troubleshooting's "Delete Wine Prefix") uses the same path.
-    static var gptkPrefix: URL {
-        FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(gptkPrefixRelativePath)
-    }
-
     private static func isPrefixValid(_ prefix: URL) -> Bool {
-        let driveCPath = prefix.appendingPathComponent("drive_c").path
-        return FileManager.default.fileExists(atPath: driveCPath)
+        let fm = FileManager.default
+        return fm.fileExists(atPath: prefix.appendingPathComponent("drive_c").path)
+            && fm.fileExists(atPath: prefix.appendingPathComponent("system.reg").path)
     }
 
-    private static func initializePrefix(wineBinary: URL, at prefix: URL) async throws {
+    /// Create a prefix under a `.partial` name and rename it into place once it is
+    /// complete, so a crash mid-way never leaves a half-made prefix in use. A `.partial`
+    /// folder never holds a game: games only move into the finished prefix.
+    ///
+    /// A folder already at `prefix` that isn't a valid prefix (a delete that only
+    /// partly finished, for instance) is moved aside, never deleted: it may still hold
+    /// the game, which `PrefixMigration` then moves into the new prefix.
+    private static func createPrefix(at prefix: URL, onLog: @escaping WineEngine.Log) async throws {
         let fm = FileManager.default
-        try fm.createDirectory(at: prefix, withIntermediateDirectories: true)
+        let partial = prefix.deletingLastPathComponent()
+            .appendingPathComponent(prefix.lastPathComponent + ".partial")
 
-        try await runWineAsync(
-            binary: wineBinary,
-            prefix: prefix,
-            arguments: ["wineboot", "--init"]
-        )
+        do {
+            try? fm.removeItem(at: partial)
+            try fm.createDirectory(at: partial, withIntermediateDirectories: true)
+
+
+            // No Mono/Gecko install prompts: Palia needs neither.
+            try await runWineAsync(
+                binary: WineEngine.wineBinary,
+                prefix: partial,
+                arguments: ["wineboot", "--init"],
+                extraEnvironment: ["WINEDLLOVERRIDES": "mscoree,mshtml="]
+            )
+            // Cmd+C/V/X act as Ctrl+C/V/X in the game.
+            for key in ["LeftCommandIsCtrl", "RightCommandIsCtrl"] {
+                try await runWineAsync(
+                    binary: WineEngine.wineBinary,
+                    prefix: partial,
+                    arguments: ["reg", "add", "HKCU\\Software\\Wine\\Mac Driver", "/v", key, "/t", "REG_SZ", "/d", "y", "/f"]
+                )
+            }
+            try await runWineAsync(
+                binary: WineEngine.wineserverBinary,
+                prefix: partial,
+                arguments: ["-w"]
+            )
+        } catch {
+            try? fm.removeItem(at: partial)
+            throw PaliumError.prefixInitFailed(error.localizedDescription)
+        }
+
+        do {
+            if fm.fileExists(atPath: prefix.path) {
+                let aside = setAsideURL(for: prefix)
+                try fm.moveItem(at: prefix, to: aside)
+                await onLog("Moved an incomplete Wine prefix aside to \(aside.lastPathComponent)", .warning)
+            }
+            try fm.moveItem(at: partial, to: prefix)
+        } catch {
+            throw PaliumError.prefixInitFailed(error.localizedDescription)
+        }
     }
 
-    // MARK: - Whisky Fallback
+    static func setAsideURL(for prefix: URL, date: Date = Date()) -> URL {
+        let stamp = Int(date.timeIntervalSince1970)
+        return prefix.deletingLastPathComponent()
+            .appendingPathComponent(prefix.lastPathComponent + PrefixMigration.stalePrefixMarker + "\(stamp)")
+    }
 
-    private static func findWhiskyBottle() -> (bottle: URL, username: String)? {
-        let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
-        let bottlesDir = home.appendingPathComponent(whiskyBottlesRelativePath)
+    /// True while a Palia game process runs (under any Wine).
+    static func isPaliaRunning() -> Bool {
+        let pgrep = Process()
+        pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        pgrep.arguments = ["-f", "PaliaClient-Win64-Shipping"]
+        pgrep.standardOutput = FileHandle.nullDevice
+        pgrep.standardError = FileHandle.nullDevice
+        guard (try? pgrep.run()) != nil else { return false }
+        pgrep.waitUntilExit()
+        return pgrep.terminationStatus == 0
+    }
 
-        guard fm.fileExists(atPath: bottlesDir.path),
-              let contents = try? fm.contentsOfDirectory(at: bottlesDir, includingPropertiesForKeys: [.isDirectoryKey]) else {
-            return nil
+    /// Stop the old GPTK prefix's wineserver, if one is running, before moving files.
+    static func stopLegacyWineserver(gptkLib: URL) {
+        let wineserver = gptkLib.deletingLastPathComponent().appendingPathComponent("bin/wineserver")
+        let legacy = PrefixMigration.legacyPrefix
+        guard FileManager.default.isExecutableFile(atPath: wineserver.path),
+              FileManager.default.fileExists(atPath: legacy.path) else { return }
+        let process = Process()
+        process.executableURL = wineserver
+        process.arguments = ["-k"]
+        var env = ProcessInfo.processInfo.environment
+        env["WINEPREFIX"] = legacy.path
+        process.environment = env
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return }
+        process.waitUntilExit()
+    }
+
+    /// Remove the old GPTK prefix once its game has been moved out. Stops its
+    /// wineserver first. Slow (thousands of files): call it off the main actor.
+    static func removeLegacyPrefix() throws {
+        let legacy = PrefixMigration.legacyPrefix
+        if let game = PrefixMigration.findGame(inPrefix: legacy) {
+            throw PaliumError.oldPrefixHasGame(game.path)
         }
-
-        for bottle in contents {
-            var isDir: ObjCBool = false
-            guard fm.fileExists(atPath: bottle.path, isDirectory: &isDir), isDir.boolValue else {
-                continue
-            }
-            if let username = try? findWineUsername(in: bottle) {
-                return (bottle, username)
-            }
+        if let lib = D3DMetal.findSource()?.lib {
+            stopLegacyWineserver(gptkLib: lib)
         }
-        return nil
+        try FileManager.default.removeItem(at: legacy)
+    }
+
+    /// The old GPTK prefix exists and holds no game, so it can be removed.
+    static var canRemoveLegacyPrefix: Bool {
+        let legacy = PrefixMigration.legacyPrefix
+        return FileManager.default.fileExists(atPath: legacy.path)
+            && PrefixMigration.findGame(inPrefix: legacy) == nil
     }
 
     // MARK: - Username Detection
@@ -261,15 +305,49 @@ nonisolated enum WineManager {
 
     // MARK: - Wine Process Helpers
 
-    static func makeWineEnvironment(info: WineInfo, metalHUD: Bool = false) -> [String: String] {
+    /// Environment shared by every Wine process Palium starts (wineboot, reg,
+    /// installers, `--version` and the game).
+    ///
+    /// The sync settings must be identical for all of them: the first Wine process
+    /// starts wineserver, and a client whose sync setting differs from the running
+    /// server's refuses to start ("Server is running with WINEMSYNC but this process
+    /// is not").
+    static func baseWineEnvironment(prefix: URL) -> [String: String] {
         var env = ProcessInfo.processInfo.environment
-        env["WINEPREFIX"] = info.prefixPath.path
+        env["WINEPREFIX"] = prefix.path
         env["WINEBOOT_HIDE_DIALOG"] = "1"
         env["WINEDEBUG"] = "-all"
-        env["WINEDLLOVERRIDES"] = "dxgi,d3d9,d3d10core,d3d11,msvcp140,msvcp140_1,msvcp140_2,vcruntime140,vcruntime140_1,vcruntime140_threads,concrt140,ucrtbase,vcomp140,mfc140u,vccorlib140=n,b"
         env["WINEMSYNC"] = "1"
-        env["DXVK_ASYNC"] = "1"
-        env["DXVK_STATE_CACHE"] = "1"
+        // D3DMetal looks for esync; with both set, Wine uses msync.
+        env["WINEESYNC"] = "1"
+        // The engine expects this outside Sikarugir's own launcher.
+        env["SikarugirAppWine11"] = "1"
+
+        // D3DMetal from the user's GPTK, through Palium's link folder: its modules
+        // go before Wine's own d3d11/d3d12/dxgi, and its dylibs (plus GPTK's
+        // freetype, gnutls, …) are found by the dynamic loader.
+        env["WINEDLLPATH_D3DMETAL"] = D3DMetal.managedModules.path
+        env["WINEDLLPATH_PREPEND"] = D3DMetal.managedModules.path
+        env["CX_APPLEGPTK_LIBD3DSHARED_PATH"] = D3DMetal.libd3dshared.path
+        env["DYLD_FALLBACK_LIBRARY_PATH"] = [
+            D3DMetal.managedExternal.path, D3DMetal.managedGPTKLib.path, "/usr/lib",
+        ].joined(separator: ":")
+        return env
+    }
+
+    /// Direct3D DLLs come from Wine's built-in modules, where D3DMetal's are first.
+    /// `n,b` here would let a stray d3d11.dll/dxgi.dll (left in the game folder or
+    /// system32 by a DXVK/DXMT experiment) silently replace D3DMetal.
+    /// d3d12core is left out on purpose: UE5 ships its own D3D12 Agility SDK
+    /// (Binaries/Win64/D3D12/D3D12Core.dll), which must not be redirected.
+    private static let graphicsDLLOverrides = "dxgi,d3d9,d3d10core,d3d11,d3d12=b"
+
+    static func makeWineEnvironment(info: WineInfo, metalHUD: Bool = false) -> [String: String] {
+        var env = baseWineEnvironment(prefix: info.prefixPath)
+        let vcOverrides = vcDLLNames
+            .map { $0.replacingOccurrences(of: ".dll", with: "") }
+            .joined(separator: ",")
+        env["WINEDLLOVERRIDES"] = "\(graphicsDLLOverrides);\(vcOverrides)=n,b"
 
         if metalHUD {
             env["MTL_HUD_ENABLED"] = "1"
@@ -282,17 +360,15 @@ nonisolated enum WineManager {
         binary: URL,
         prefix: URL,
         arguments: [String],
+        extraEnvironment: [String: String] = [:],
         timeout: TimeInterval = 120
     ) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             let process = Process()
             process.executableURL = binary
             process.arguments = arguments
-            var env = ProcessInfo.processInfo.environment
-            env["WINEPREFIX"] = prefix.path
-            env["WINEBOOT_HIDE_DIALOG"] = "1"
-            env["WINEDEBUG"] = "-all"
-            process.environment = env
+            process.environment = baseWineEnvironment(prefix: prefix)
+                .merging(extraEnvironment) { _, new in new }
             process.standardOutput = FileHandle.nullDevice
             process.standardError = FileHandle.nullDevice
 
@@ -366,25 +442,50 @@ nonisolated enum WineManager {
         "vccorlib140.dll", "vcruntime140_threads.dll",
     ]
 
+    /// The VC++ DLLs Palia's binaries import (`ucrtbase` through the api-ms-win-crt
+    /// forwarders). Others in `vcDLLNames`, like mfc140u or vcruntime140_threads, are
+    /// overridden if present but nothing in the game loads them.
+    static let gameVCDLLNames = [
+        "msvcp140.dll", "msvcp140_1.dll", "vcruntime140.dll", "vcruntime140_1.dll", "ucrtbase.dll",
+    ]
+
     /// Run all troubleshooting diagnostics and return results.
     static func runDiagnostics(info: WineInfo) async -> [DiagnosticResult] {
         var results: [DiagnosticResult] = []
         let fm = FileManager.default
 
+        let engineInstalled = WineEngine.isInstalled()
+        results.append(DiagnosticResult(
+            name: "Wine Engine",
+            passed: engineInstalled,
+            detail: engineInstalled
+                ? "\(WineEngine.current.displayName), checksum verified"
+                : "Not installed — restart Palium to download it"
+        ))
+
+        let source = D3DMetal.findSource()
+        results.append(DiagnosticResult(
+            name: "D3DMetal (Game Porting Toolkit)",
+            passed: source != nil,
+            detail: source.map { "\($0.version ?? "unknown version") — \($0.lib.path)" }
+                ?? "Game Porting Toolkit not found in /Applications"
+        ))
+        let linksOK = D3DMetal.isPrepared()
+        results.append(DiagnosticResult(
+            name: "D3DMetal Links",
+            passed: linksOK,
+            detail: linksOK ? D3DMetal.managedDirectory.path : "Missing or broken — restart Palium"
+        ))
+
         let winePath = info.wineBinaryURL.path
         let wineExists = fm.isExecutableFile(atPath: winePath)
-        results.append(DiagnosticResult(
-            name: "Wine Binary",
-            passed: wineExists,
-            detail: wineExists ? winePath : "Not found at \(winePath)"
-        ))
 
         if wineExists {
             let versionOutput = await getWineVersion(binary: info.wineBinaryURL, prefix: info.prefixPath)
             results.append(DiagnosticResult(
                 name: "Wine Runs",
                 passed: versionOutput != nil,
-                detail: versionOutput ?? "wine64 --version failed to execute"
+                detail: versionOutput ?? "wine --version failed to execute"
             ))
         } else {
             results.append(DiagnosticResult(name: "Wine Runs", passed: false, detail: "Skipped (no binary)"))
@@ -420,33 +521,25 @@ nonisolated enum WineManager {
         ))
 
         let sys32 = info.prefixPath.appendingPathComponent("drive_c/windows/system32")
-        for dll in vcDLLNames {
-            let dllPath = sys32.appendingPathComponent(dll).path
-            if let attrs = try? fm.attributesOfItem(atPath: dllPath),
+        for dll in gameVCDLLNames {
+            let dllURL = sys32.appendingPathComponent(dll)
+            if let attrs = try? fm.attributesOfItem(atPath: dllURL.path),
                let size = attrs[.size] as? UInt64 {
                 let isReal = size > minRealDLLSize
+                // Wine's own implementation works for the game too; say which one it is.
+                let origin = isWineBuiltinDLL(dllURL) ? "Wine's own copy" : "Microsoft"
                 results.append(DiagnosticResult(
                     name: dll,
                     passed: isReal,
-                    detail: isReal ? "\(formatSize(size))" : "\(formatSize(size)) (Wine stub)"
+                    detail: isReal ? "\(origin), \(formatSize(size))" : "\(formatSize(size)) (Wine stub)"
                 ))
             } else {
                 results.append(DiagnosticResult(name: dll, passed: false, detail: "Missing"))
             }
         }
 
-        let userRegPath = info.prefixPath.appendingPathComponent("user.reg").path
-        if let userRegContents = try? String(contentsOfFile: userRegPath, encoding: .utf8) {
-            let hasOverrides = userRegContents.contains("DllOverrides")
-                && userRegContents.contains("vcruntime140")
-            results.append(DiagnosticResult(
-                name: "DLL Overrides (user.reg)",
-                passed: hasOverrides,
-                detail: hasOverrides ? "native,builtin entries found" : "Missing Wine DLL override entries"
-            ))
-        } else {
-            results.append(DiagnosticResult(name: "DLL Overrides (user.reg)", passed: false, detail: "user.reg not found"))
-        }
+        // DLL overrides are passed with WINEDLLOVERRIDES at launch, not read from
+        // user.reg, so there is nothing in the prefix to check for them.
 
         let gameInstalled = isGameInstalled(info: info)
         results.append(DiagnosticResult(
@@ -458,17 +551,21 @@ nonisolated enum WineManager {
         return results
     }
 
-    /// Run `wine64 --version` and capture output.
+    /// Wine's own DLLs carry this text in their DOS header area.
+    static func isWineBuiltinDLL(_ url: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        let header = (try? handle.read(upToCount: 1024)) ?? Data()
+        return header.range(of: Data("Wine builtin DLL".utf8)) != nil
+    }
+
+    /// Run `wine --version` and capture output.
     private static func getWineVersion(binary: URL, prefix: URL) async -> String? {
         await withCheckedContinuation { continuation in
             let process = Process()
             process.executableURL = binary
             process.arguments = ["--version"]
-            var env = ProcessInfo.processInfo.environment
-            env["WINEPREFIX"] = prefix.path
-            env["WINEBOOT_HIDE_DIALOG"] = "1"
-            env["WINEDEBUG"] = "-all"
-            process.environment = env
+            process.environment = baseWineEnvironment(prefix: prefix)
 
             let pipe = Pipe()
             process.standardOutput = pipe
@@ -495,8 +592,10 @@ nonisolated enum WineManager {
         let fm = FileManager.default
         let sys32 = info.prefixPath.appendingPathComponent("drive_c/windows/system32")
 
-        // Check that vcruntime140.dll exists and is a real Microsoft DLL,
-        // not a tiny Wine builtin stub
+        // vcruntime140.dll must be a working DLL, not a tiny placeholder. Wine's own
+        // full implementation counts: Palia runs on it (tested with Wine 11, DX11 and
+        // DX12), and refusing it would rerun the installers on every start whenever
+        // Microsoft's DLLs can't be installed. Diagnostics show which one is present.
         let vcrt = sys32.appendingPathComponent("vcruntime140.dll").path
         guard fm.fileExists(atPath: vcrt),
               let attrs = try? fm.attributesOfItem(atPath: vcrt),
@@ -544,9 +643,8 @@ nonisolated enum WineManager {
         }
 
         // Step 2: Try running installers via Wine
-        let wineUser = info.wineUsername
         for (_, filename) in redistributables {
-            let winePath = "C:\\users\\\(wineUser)\\Downloads\\\(filename)"
+            let winePath = "\(info.wineDownloadsWindowsPath)\\\(filename)"
             log("Running \(filename) via Wine...", .info)
             do {
                 try await runWineAsync(
@@ -560,13 +658,16 @@ nonisolated enum WineManager {
             }
         }
 
-        // Step 3: Verify DLLs are real — if they're Wine stubs, extract natively
+        // Step 3: If the installers didn't put Microsoft's DLLs in place (a placeholder,
+        // or Wine's own copy, which is larger than a placeholder), extract them directly.
         let sys32 = info.prefixPath.appendingPathComponent("drive_c/windows/system32")
         let vcrt = sys32.appendingPathComponent("vcruntime140.dll").path
         let vcrtSize = ((try? fm.attributesOfItem(atPath: vcrt))?[.size] as? UInt64) ?? 0
+        let isWineCopy = isWineBuiltinDLL(URL(fileURLWithPath: vcrt))
 
-        if vcrtSize < minRealDLLSize {
-            log("vcruntime140.dll is \(formatSize(vcrtSize)) (Wine stub) — extracting from redistributable...", .warning)
+        if vcrtSize < minRealDLLSize || isWineCopy {
+            let what = isWineCopy ? "Wine's own copy" : "a placeholder"
+            log("vcruntime140.dll is \(what) (\(formatSize(vcrtSize))) — extracting Microsoft's from the redistributable...", .warning)
             try await extractVCRuntimeDLLs(
                 from: downloadsPath.appendingPathComponent("vc_redist.x64.exe"),
                 to: sys32,
@@ -637,9 +738,8 @@ nonisolated enum WineManager {
         onLog("Extracted payload CAB (\(formatSize(UInt64(payloadSize))))", .success)
 
         // Step 2: Use Wine's expand.exe to extract the CAB contents
-        let wineUser = info.wineUsername
-        let cabWinePath = "C:\\users\\\(wineUser)\\Downloads\\cab_extract\\payload.cab"
-        let outWinePath = "C:\\users\\\(wineUser)\\Downloads\\cab_extract\\out"
+        let cabWinePath = "\(info.wineDownloadsWindowsPath)\\cab_extract\\payload.cab"
+        let outWinePath = "\(info.wineDownloadsWindowsPath)\\cab_extract\\out"
         let outDir = cabDir.appendingPathComponent("out")
         try fm.createDirectory(at: outDir, withIntermediateDirectories: true)
 

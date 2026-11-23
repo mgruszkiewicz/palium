@@ -136,3 +136,35 @@ To move to Developer ID later, add to the release workflow before the DMG step:
 
 Nothing about the appcast or the EdDSA key changes. Sparkle keeps accepting updates
 across the transition because the EdDSA signature stays valid on its own.
+
+## Publishing a Wine engine
+
+Palium downloads its Wine engine from a release of this repository first, and from
+the upstream release as a fallback (`WineEngine.current.urls`). Both are checked
+against the SHA-256 pinned in `WineEngine.swift`. The copy here is published by
+`.github/workflows/engine-mirror.yml`, which runs only on request:
+
+1. Pin the new engine in `WineEngine.current` (`name`, `sha256`, `downloadSize`,
+   both URLs), with the mirror URL
+   `https://github.com/mgruszkiewicz/palium/releases/download/engine-<name>/<file>`.
+2. Once that is on `main`, run **Actions › Mirror Wine engine › Run workflow** with
+   the same name, the upstream URL and the SHA-256:
+
+   ```sh
+   gh workflow run engine-mirror.yml \
+     -f name=wine-11.0_1 \
+     -f archive_url=https://github.com/Sikarugir-App/Engines/releases/download/v1.0/WS12WineSikarugir11.0_1.tar.xz \
+     -f sha256=67e29fb3d74f363af39c69ba11f9b13a79812c5db07cf4748672658e4a200a0e
+   ```
+
+The workflow downloads the archive on GitHub's runner, refuses it if the SHA-256
+differs, attests it, and creates the release `engine-<name>`. That tag doesn't start
+with `v`, so the app release workflow doesn't run, and the release is never marked
+Latest, so `releases/latest` keeps pointing at the app. An existing engine release
+is never replaced: publish a new name instead.
+
+`source_url` optionally mirrors a source archive next to the engine. Wine is LGPL:
+the release notes link the Sikarugir and CrossOver sources, but Sikarugir publishes
+no tag matching an exact engine build, so attach the matching source archive when
+one is available.
+

@@ -4,6 +4,7 @@ nonisolated enum GameLauncher {
 
     struct LaunchOptions: Sendable {
         let metalHUD: Bool
+        let graphicsAPI: LaunchSettings.GraphicsAPI
         let useAllCores: Bool
     }
 
@@ -29,9 +30,9 @@ nonisolated enum GameLauncher {
             throw PaliumError.gameNotInstalled
         }
 
-        var arguments = [gameWindowsPath, "-dx11"]
+        var arguments = [gameWindowsPath, options.graphicsAPI.launchArgument]
 
-        // UE4 engine flags
+        // Unreal Engine flags
         if options.useAllCores {
             arguments.append("-USEALLAVAILABLECORES")
         }
