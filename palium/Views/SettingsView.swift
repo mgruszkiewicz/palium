@@ -76,54 +76,36 @@ struct SettingsView: View {
 
     private var wineTab: some View {
         Form {
-            Picker("Wine Source", selection: $settings.wineSource) {
-                ForEach(LaunchSettings.WineSource.allCases, id: \.self) { source in
-                    HStack {
-                        Text(source.rawValue)
-                        if source != .auto {
-                            availabilityBadge(for: source)
-                        }
-                    }
-                    .tag(source)
-                }
-            }
-            .pickerStyle(.radioGroup)
+            let engineInstalled = WineEngine.isInstalled()
+            statusRow(
+                label: "Wine engine",
+                ok: engineInstalled,
+                detail: engineInstalled ? WineEngine.current.displayName : "Downloaded on next start"
+            )
+
+            let d3dMetal = D3DMetal.findSource()
+            statusRow(
+                label: "D3DMetal",
+                ok: d3dMetal != nil,
+                detail: d3dMetal.map { "\($0.version ?? "?") from Game Porting Toolkit" } ?? "Game Porting Toolkit not found"
+            )
 
             HStack {
                 Text("Wine Prefix")
                     .font(.caption)
                 Spacer()
                 Button("Open in Finder") {
-                    let prefix = prefixPath
-                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: prefix)
+                    NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: WineManager.prefix.path)
                 }
                 .controlSize(.small)
             }
 
-            Divider()
-
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Detected Environment")
-                    .font(.headline)
-
-                detectedInfoRow(
-                    label: "GPTK (Homebrew)",
-                    available: WineManager.isGPTKInstalled,
-                    path: gptkPath
-                )
-                detectedInfoRow(
-                    label: "Whisky",
-                    available: WineManager.isWhiskyInstalled,
-                    path: whiskyPath
-                )
-            }
-
-            if !WineManager.isGPTKInstalled && !WineManager.isWhiskyInstalled {
+            if d3dMetal == nil {
                 Divider()
                 VStack(alignment: .leading, spacing: 4) {
-                    Label("No Wine environment found", systemImage: "exclamationmark.triangle")
+                    Label("Game Porting Toolkit is required", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
-                    Text("Install via Homebrew:")
+                    Text("Palium runs Palia on its own Wine 11 engine and uses Apple's D3DMetal from Game Porting Toolkit for graphics. Install it with Homebrew:")
                         .font(.caption)
                     HStack {
                         Text("brew install --cask game-porting-toolkit")
@@ -144,79 +126,36 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    @ViewBuilder
-    private func availabilityBadge(for source: LaunchSettings.WineSource) -> some View {
-        let available: Bool = switch source {
-        case .gptk: WineManager.isGPTKInstalled
-        case .whisky: WineManager.isWhiskyInstalled
-        case .auto: true
-        }
-
-        if available {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-                .font(.caption)
-        } else {
-            Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.red)
-                .font(.caption)
-        }
-    }
-
-    private func detectedInfoRow(label: String, available: Bool, path: String?) -> some View {
+    private func statusRow(label: String, ok: Bool, detail: String) -> some View {
         HStack {
-            Image(systemName: available ? "checkmark.circle.fill" : "xmark.circle")
-                .foregroundStyle(available ? .green : .secondary)
+            Image(systemName: ok ? "checkmark.circle.fill" : "xmark.circle")
+                .foregroundStyle(ok ? .green : .secondary)
                 .font(.caption)
             Text(label)
                 .font(.caption)
             Spacer()
-            if let path {
-                Text(path)
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            } else {
-                Text("Not found")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
-            }
+            Text(detail)
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.tertiary)
+                .lineLimit(1)
+                .truncationMode(.middle)
         }
-    }
-
-    private var prefixPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        switch settings.wineSource {
-        case .whisky:
-            let bottlesDir = home.appendingPathComponent(
-                "Library/Containers/com.isaacmarovitz.Whisky/Bottles"
-            )
-            if let contents = try? FileManager.default.contentsOfDirectory(
-                at: bottlesDir, includingPropertiesForKeys: nil
-            ), let first = contents.first {
-                return first.path
-            }
-            return bottlesDir.path
-        case .gptk, .auto:
-            return home.appendingPathComponent(
-                "Library/Application Support/com.palium/prefix"
-            ).path
-        }
-    }
-
-    private var gptkPath: String? {
-        WineManager.findGPTKBinary()?.path
-    }
-
-    private var whiskyPath: String? {
-        WineManager.findWhiskyBinary()?.path
     }
 
     // MARK: - Graphics Tab
 
     private var graphicsTab: some View {
         Form {
+            Picker("Renderer", selection: $settings.graphicsAPI) {
+                ForEach(LaunchSettings.GraphicsAPI.allCases, id: \.self) { api in
+                    Text(api.rawValue).tag(api)
+                }
+            }
+            .pickerStyle(.segmented)
+            Text("DirectX 11 is the tested default. DirectX 12 is experimental: Unreal Engine 5 can then prepare shaders ahead of time instead of mid-game, which may reduce stutter. If the game does not start, switch back to DirectX 11.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Toggle("Metal Performance HUD", isOn: $settings.metalHUD)
             Text("Show an FPS counter and GPU usage overlay powered by Metal. Useful for monitoring performance.")
                 .font(.caption)
@@ -230,7 +169,7 @@ struct SettingsView: View {
     private var performanceTab: some View {
         Form {
             Toggle("Use All CPU Cores", isOn: $settings.useAllCores)
-            Text("Passes -USEALLAVAILABLECORES to Unreal Engine 4, enabling multi-core task scheduling.")
+            Text("Passes -USEALLAVAILABLECORES to Unreal Engine, enabling multi-core task scheduling.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

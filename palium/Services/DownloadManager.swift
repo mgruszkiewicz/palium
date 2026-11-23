@@ -461,6 +461,19 @@ actor DownloadManager {
         return corruptFiles
     }
 
+    /// Files that are missing or have the wrong size. No hashing: a quick check for
+    /// whether a moved install is complete.
+    static nonisolated func sizeMismatches(manifest: UpdateManifest, installDirectory: URL) -> [ManifestFile] {
+        let fm = FileManager.default
+        return manifest.files.filter { file in
+            let path = installDirectory.appendingPathComponent(file.path).path
+            guard let size = (try? fm.attributesOfItem(atPath: path))?[.size] as? UInt64 else {
+                return true
+            }
+            return size != file.size
+        }
+    }
+
     // Nonisolated async so hashing runs on the global executor, off the actor.
     private static nonisolated func verifyOneFile(file: ManifestFile, installDirectory: URL) async -> VerifyResult {
         let destURL = installDirectory.appendingPathComponent(file.path)

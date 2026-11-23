@@ -6,6 +6,8 @@ struct TroubleshootingTab: View {
     @State private var isRunning = false
     @State private var isReinstallingVC = false
     @State private var hasRun = false
+    @State private var confirmDeletePrefix = false
+    @State private var hasLegacyPrefix = WineManager.hasLegacyPrefix
 
     var body: some View {
         VStack(spacing: 0) {
@@ -122,11 +124,29 @@ struct TroubleshootingTab: View {
 
                 Spacer()
 
+                if hasLegacyPrefix {
+                    Button("Remove Old GPTK Prefix") {
+                        removeLegacyPrefix()
+                    }
+                    .controlSize(.small)
+                    .help("The Wine 7.7 prefix from before Palium moved to Wine 11. The game was moved out of it.")
+                }
+
                 Button("Delete Wine Prefix") {
-                    deletePrefix()
+                    confirmDeletePrefix = true
                 }
                 .controlSize(.small)
                 .foregroundStyle(.red)
+            }
+            .confirmationDialog(
+                "Delete the Wine prefix?",
+                isPresented: $confirmDeletePrefix
+            ) {
+                Button("Delete Prefix and Game", role: .destructive) {
+                    deletePrefix()
+                }
+            } message: {
+                Text("The game is installed inside the prefix, so it will be downloaded again on the next start.")
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
@@ -196,14 +216,12 @@ struct TroubleshootingTab: View {
         isRunning = true
         hasRun = true
 
-        guard let info = try? await WineManager.detect(
-            preferredSource: LaunchSettings.shared.wineSource
-        ) else {
+        guard let info = WineManager.currentInfo() else {
             results = [
                 WineManager.DiagnosticResult(
-                    name: "Wine Detection",
+                    name: "Wine Prefix",
                     passed: false,
-                    detail: "No Wine environment found — install GPTK or Whisky first"
+                    detail: "Not set up yet — restart Palium to create it"
                 )
             ]
             isRunning = false
@@ -218,10 +236,8 @@ struct TroubleshootingTab: View {
         isReinstallingVC = true
         logEntries = []
 
-        guard let info = try? await WineManager.detect(
-            preferredSource: LaunchSettings.shared.wineSource
-        ) else {
-            logEntries.append(LogEntry(level: .error, message: "Wine detection failed"))
+        guard let info = WineManager.currentInfo() else {
+            logEntries.append(LogEntry(level: .error, message: "No Wine prefix yet — restart Palium to create it"))
             isReinstallingVC = false
             return
         }
@@ -246,20 +262,26 @@ struct TroubleshootingTab: View {
         logEntries = []
         hasRun = false
 
-        // File removal and wineserver shutdown run off the main thread.
+        // Wineserver shutdown and file removal run off the main thread.
         Task.detached(priority: .utility) {
-            try? FileManager.default.removeItem(at: WineManager.gptkPrefix)
-            // Also kill wineserver so it doesn't hold stale state
-            let binDir = (WineManager.findGPTKBinary() ?? WineManager.findWhiskyBinary())?.deletingLastPathComponent()
-            if let wineserver = binDir?.appendingPathComponent("wineserver") {
-                let p = Process()
-                p.executableURL = wineserver
-                p.arguments = ["-k"]
-                p.standardOutput = FileHandle.nullDevice
-                p.standardError = FileHandle.nullDevice
-                try? p.run()
-                p.waitUntilExit()
-            }
+            let p = Process()
+            p.executableURL = WineEngine.wineserverBinary
+            p.arguments = ["-k"]
+            p.environment = WineManager.baseWineEnvironment(prefix: WineManager.prefix)
+            p.standardOutput = FileHandle.nullDevice
+            p.standardError = FileHandle.nullDevice
+            if (try? p.run()) != nil { p.waitUntilExit() }
+            try? FileManager.default.removeItem(at: WineManager.prefix)
+        }
+    }
+
+    private func removeLegacyPrefix() {
+        do {
+            try WineManager.removeLegacyPrefix()
+            hasLegacyPrefix = false
+            logEntries.append(LogEntry(level: .success, message: "Removed the old GPTK prefix"))
+        } catch {
+            logEntries.append(LogEntry(level: .error, message: "Couldn't remove the old prefix: \(error.localizedDescription)"))
         }
     }
 }

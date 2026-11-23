@@ -296,6 +296,8 @@ struct PaliumErrorTests {
             .launchFailed("reason"),
             .cdnError("msg"),
             .prefixInitFailed("reason"),
+            .engineInstallFailed("reason"),
+            .migrationFailed("reason"),
         ]
         for error in errors {
             #expect(error.errorDescription != nil)
@@ -312,8 +314,7 @@ struct WineInfoTests {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/prefix"),
-            wineUsername: "testuser",
-            source: .gptk
+            wineUsername: "testuser"
         )
         #expect(info.gameInstallPath.path.contains("testuser"))
         #expect(info.gameInstallPath.path.hasSuffix("Palia/Client"))
@@ -323,8 +324,7 @@ struct WineInfoTests {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/prefix"),
-            wineUsername: "player",
-            source: .whisky
+            wineUsername: "player"
         )
         #expect(info.gameSavedPath.path.contains("player"))
         #expect(info.gameSavedPath.path.hasSuffix("Palia/Saved"))
@@ -334,15 +334,12 @@ struct WineInfoTests {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/prefix"),
-            wineUsername: "user",
-            source: .gptk
+            wineUsername: "user"
         )
-        #expect(info.wineDownloadsPath.path.hasSuffix("Downloads"))
-    }
-
-    @Test func sourceRawValues() {
-        #expect(WineInfo.Source.gptk.rawValue == "GPTK")
-        #expect(WineInfo.Source.whisky.rawValue == "Whisky")
+        // Never the Windows user's Downloads, which Wine links to the Mac's ~/Downloads.
+        #expect(info.wineDownloadsPath.path.hasSuffix("drive_c/palium-downloads"))
+        #expect(!info.wineDownloadsPath.path.contains("/users/"))
+        #expect(info.wineDownloadsWindowsPath == "C:\\palium-downloads")
     }
 }
 
@@ -350,25 +347,10 @@ struct WineInfoTests {
 
 struct LaunchSettingsTests {
 
-    @Test func wineSourceCases() {
-        let cases = LaunchSettings.WineSource.allCases
-        #expect(cases.count == 3)
-        #expect(cases.contains(.auto))
-        #expect(cases.contains(.gptk))
-        #expect(cases.contains(.whisky))
-    }
-
-    @Test func wineSourceRawValues() {
-        #expect(LaunchSettings.WineSource.auto.rawValue == "Automatic")
-        #expect(LaunchSettings.WineSource.gptk.rawValue == "GPTK (Homebrew)")
-        #expect(LaunchSettings.WineSource.whisky.rawValue == "Whisky")
-    }
-
-    @Test func wineSourceCodable() throws {
-        let source = LaunchSettings.WineSource.gptk
-        let data = try JSONEncoder().encode(source)
-        let decoded = try JSONDecoder().decode(LaunchSettings.WineSource.self, from: data)
-        #expect(decoded == source)
+    @Test func graphicsAPICodable() throws {
+        let data = try JSONEncoder().encode(LaunchSettings.GraphicsAPI.dx12)
+        let decoded = try JSONDecoder().decode(LaunchSettings.GraphicsAPI.self, from: data)
+        #expect(decoded == .dx12)
     }
 }
 
@@ -377,19 +359,24 @@ struct LaunchSettingsTests {
 struct GameLauncherTests {
 
     @Test func launchOptionsDefaults() {
-        let options = GameLauncher.LaunchOptions(metalHUD: false, useAllCores: true)
+        let options = GameLauncher.LaunchOptions(metalHUD: false, graphicsAPI: .dx11, useAllCores: true)
         #expect(options.metalHUD == false)
+        #expect(options.graphicsAPI == .dx11)
         #expect(options.useAllCores == true)
+    }
+
+    @Test func graphicsAPILaunchArguments() {
+        #expect(LaunchSettings.GraphicsAPI.dx11.launchArgument == "-dx11")
+        #expect(LaunchSettings.GraphicsAPI.dx12.launchArgument == "-dx12")
     }
 
     @Test func launchFailsWithMissingGame() {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/false"),
             prefixPath: URL(fileURLWithPath: "/tmp/nonexistent"),
-            wineUsername: "test",
-            source: .gptk
+            wineUsername: "test"
         )
-        let options = GameLauncher.LaunchOptions(metalHUD: false, useAllCores: false)
+        let options = GameLauncher.LaunchOptions(metalHUD: false, graphicsAPI: .dx11, useAllCores: false)
         #expect(throws: PaliumError.self) {
             _ = try GameLauncher.launch(info: info, options: options)
         }
@@ -404,25 +391,45 @@ struct WineManagerTests {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/testprefix"),
-            wineUsername: "test",
-            source: .gptk
+            wineUsername: "test"
         )
         let env = WineManager.makeWineEnvironment(info: info)
         #expect(env["WINEPREFIX"] == "/tmp/testprefix")
         #expect(env["WINEBOOT_HIDE_DIALOG"] == "1")
         #expect(env["WINEDEBUG"] == "-all")
+        #expect(env["WINEESYNC"] == "1")
         #expect(env["WINEMSYNC"] == "1")
-        #expect(env["DXVK_ASYNC"] == "1")
-        #expect(env["DXVK_STATE_CACHE"] == "1")
+        #expect(env["DXVK_ASYNC"] == nil)
+        #expect(env["DXVK_STATE_CACHE"] == nil)
         #expect(env["MTL_HUD_ENABLED"] == nil)
+        #expect(env["SikarugirAppWine11"] == "1")
+        #expect(env["WINEDLLPATH_D3DMETAL"] == D3DMetal.managedModules.path)
+        #expect(env["WINEDLLPATH_PREPEND"] == D3DMetal.managedModules.path)
+        #expect(env["CX_APPLEGPTK_LIBD3DSHARED_PATH"] == D3DMetal.libd3dshared.path)
+        #expect(env["DYLD_FALLBACK_LIBRARY_PATH"]?.hasPrefix(D3DMetal.managedExternal.path) == true)
+    }
+
+    /// Every Wine process must agree on esync with the running wineserver.
+    @Test func baseEnvironmentMatchesGameSyncSettings() {
+        let prefix = URL(fileURLWithPath: "/tmp/testprefix")
+        let info = WineInfo(
+            wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
+            prefixPath: prefix,
+            wineUsername: "test"
+        )
+        let base = WineManager.baseWineEnvironment(prefix: prefix)
+        let game = WineManager.makeWineEnvironment(info: info)
+        for key in ["WINEPREFIX", "WINEESYNC", "WINEMSYNC", "WINEDLLPATH_PREPEND", "DYLD_FALLBACK_LIBRARY_PATH"] {
+            #expect(base[key] != nil)
+            #expect(base[key] == game[key])
+        }
     }
 
     @Test func makeWineEnvironmentWithMetalHUD() {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/testprefix"),
-            wineUsername: "test",
-            source: .gptk
+            wineUsername: "test"
         )
         let env = WineManager.makeWineEnvironment(info: info, metalHUD: true)
         #expect(env["MTL_HUD_ENABLED"] == "1")
@@ -432,8 +439,7 @@ struct WineManagerTests {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/testprefix"),
-            wineUsername: "test",
-            source: .gptk
+            wineUsername: "test"
         )
         let env = WineManager.makeWineEnvironment(info: info)
         let overrides = env["WINEDLLOVERRIDES"] ?? ""
@@ -449,12 +455,34 @@ struct WineManagerTests {
         #expect(overrides.contains("n,b"))
     }
 
+    @Test func direct3DOverridesAreBuiltinOnly() {
+        let info = WineInfo(
+            wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
+            prefixPath: URL(fileURLWithPath: "/tmp/testprefix"),
+            wineUsername: "test"
+        )
+        let overrides = WineManager.makeWineEnvironment(info: info)["WINEDLLOVERRIDES"] ?? ""
+        var modes: [String: String] = [:]
+        for group in overrides.split(separator: ";") {
+            let parts = group.split(separator: "=", maxSplits: 1)
+            guard parts.count == 2 else { continue }
+            for dll in parts[0].split(separator: ",") {
+                modes[String(dll)] = String(parts[1])
+            }
+        }
+        for dll in ["dxgi", "d3d9", "d3d10core", "d3d11", "d3d12"] {
+            #expect(modes[dll] == "b", "\(dll) should load Wine's built-in (D3DMetal)")
+        }
+        #expect(modes["d3d12core"] == nil, "the game's own D3D12 Agility SDK must stay loadable")
+        #expect(modes["vcruntime140"] == "n,b")
+        #expect(modes["msvcp140"] == "n,b")
+    }
+
     @Test func isVCRuntimeInstalledReturnsFalseForMissingPrefix() {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/nonexistent_prefix_\(UUID())"),
-            wineUsername: "test",
-            source: .gptk
+            wineUsername: "test"
         )
         #expect(WineManager.isVCRuntimeInstalled(info: info) == false)
     }
@@ -463,8 +491,7 @@ struct WineManagerTests {
         let info = WineInfo(
             wineBinaryURL: URL(fileURLWithPath: "/usr/bin/wine64"),
             prefixPath: URL(fileURLWithPath: "/tmp/nonexistent_prefix_\(UUID())"),
-            wineUsername: "test",
-            source: .gptk
+            wineUsername: "test"
         )
         #expect(WineManager.isGameInstalled(info: info) == false)
     }
@@ -601,6 +628,326 @@ struct WineManagerTests {
         #expect(throws: PaliumError.self) {
             _ = try WineManager.findWineUsername(in: prefix)
         }
+    }
+}
+
+// MARK: - D3DMetal Tests
+
+struct D3DMetalTests {
+
+    /// A fake GPTK `lib` folder: D3DMetal's pieces plus an unrelated Wine 7.7 module.
+    private func makeGPTKLib(modules: [String] = ["d3d11", "d3d12", "dxgi", "d3d10"]) throws -> URL {
+        let fm = FileManager.default
+        let lib = fm.temporaryDirectory.appendingPathComponent("gptk_\(UUID())/wine/lib")
+        let framework = lib.appendingPathComponent("external/D3DMetal.framework/Resources")
+        try fm.createDirectory(at: framework, withIntermediateDirectories: true)
+        try (["CFBundleShortVersionString": "3.0"] as NSDictionary)
+            .write(to: framework.appendingPathComponent("Info.plist"))
+        try Data().write(to: lib.appendingPathComponent("external/libd3dshared.dylib"))
+        let windows = lib.appendingPathComponent("wine/x86_64-windows")
+        let unix = lib.appendingPathComponent("wine/x86_64-unix")
+        try fm.createDirectory(at: windows, withIntermediateDirectories: true)
+        try fm.createDirectory(at: unix, withIntermediateDirectories: true)
+        for module in modules + ["kernel32"] {
+            try Data().write(to: windows.appendingPathComponent("\(module).dll"))
+            try Data().write(to: unix.appendingPathComponent("\(module).so"))
+        }
+        return lib
+    }
+
+    @Test func findsSourceWithVersion() throws {
+        let lib = try makeGPTKLib()
+        defer { try? FileManager.default.removeItem(at: lib.deletingLastPathComponent().deletingLastPathComponent()) }
+        let source = D3DMetal.findSource(candidates: [lib.path])
+        #expect(source?.lib.path == lib.path)
+        #expect(source?.version == "3.0")
+    }
+
+    @Test func rejectsGPTKWithoutRequiredModule() throws {
+        let lib = try makeGPTKLib(modules: ["d3d11", "dxgi"])
+        defer { try? FileManager.default.removeItem(at: lib.deletingLastPathComponent().deletingLastPathComponent()) }
+        #expect(D3DMetal.findSource(candidates: [lib.path]) == nil)
+    }
+
+    @Test func resolvesLibFromWine64Link() throws {
+        let fm = FileManager.default
+        let lib = try makeGPTKLib()
+        let wineDir = lib.deletingLastPathComponent()
+        defer { try? fm.removeItem(at: wineDir.deletingLastPathComponent()) }
+        let bin = wineDir.appendingPathComponent("bin")
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        try Data().write(to: bin.appendingPathComponent("wine64"))
+        let link = wineDir.deletingLastPathComponent().appendingPathComponent("brew-wine64")
+        try fm.createSymbolicLink(at: link, withDestinationURL: bin.appendingPathComponent("wine64"))
+
+        // Candidates named wine64 resolve to <wine>/lib.
+        let renamed = wineDir.deletingLastPathComponent().appendingPathComponent("brewbin")
+        try fm.createDirectory(at: renamed, withIntermediateDirectories: true)
+        try fm.moveItem(at: link, to: renamed.appendingPathComponent("wine64"))
+        let source = D3DMetal.findSource(candidates: [renamed.appendingPathComponent("wine64").path])
+        #expect(source?.lib.resolvingSymlinksInPath().path == lib.resolvingSymlinksInPath().path)
+    }
+
+    @Test func prepareLinksOnlyD3DMetalModules() throws {
+        let fm = FileManager.default
+        let lib = try makeGPTKLib()
+        let managed = fm.temporaryDirectory.appendingPathComponent("d3dm_\(UUID())/d3dmetal")
+        defer {
+            try? fm.removeItem(at: lib.deletingLastPathComponent().deletingLastPathComponent())
+            try? fm.removeItem(at: managed.deletingLastPathComponent())
+        }
+        let source = try #require(D3DMetal.findSource(candidates: [lib.path]))
+
+        try D3DMetal.prepare(source: source, in: managed)
+        try D3DMetal.prepare(source: source, in: managed) // rebuilding replaces cleanly
+
+        let windows = managed.appendingPathComponent("lib/wine/x86_64-windows")
+        let names = try fm.contentsOfDirectory(atPath: windows.path).sorted()
+        #expect(names == ["d3d10.dll", "d3d11.dll", "d3d12.dll", "dxgi.dll"])
+        #expect(!fm.fileExists(atPath: windows.appendingPathComponent("kernel32.dll").path))
+        #expect(D3DMetal.isPrepared(in: managed))
+        #expect(!fm.fileExists(atPath: managed.deletingLastPathComponent().appendingPathComponent("d3dmetal.partial").path))
+
+        // GPTK removed: the links dangle and the folder no longer counts as prepared.
+        try fm.removeItem(at: lib)
+        #expect(!D3DMetal.isPrepared(in: managed))
+    }
+}
+
+// MARK: - WineEngine Tests
+
+struct WineEngineTests {
+
+    private func makeArchive(withWine: Bool) throws -> (archive: URL, workDir: URL) {
+        let fm = FileManager.default
+        let work = fm.temporaryDirectory.appendingPathComponent("engine_\(UUID())")
+        let bin = work.appendingPathComponent("src/wswine.bundle/bin")
+        try fm.createDirectory(at: bin, withIntermediateDirectories: true)
+        if withWine {
+            let wine = bin.appendingPathComponent("wine")
+            try Data("#!/bin/sh\n".utf8).write(to: wine)
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: wine.path)
+        }
+        let archive = work.appendingPathComponent("engine.tar.xz")
+        let tar = Process()
+        tar.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        tar.arguments = ["-cJf", archive.path, "-C", work.appendingPathComponent("src").path, "wswine.bundle"]
+        try tar.run()
+        tar.waitUntilExit()
+        return (archive, work)
+    }
+
+    private func release(name: String) -> WineEngine.Release {
+        WineEngine.Release(name: name, displayName: "test", sha256: "abc123", downloadSize: 1, urls: [])
+    }
+
+    @Test func installUnpacksIntoPlaceWithMarker() throws {
+        let fm = FileManager.default
+        let (archive, work) = try makeArchive(withWine: true)
+        defer { try? fm.removeItem(at: work) }
+        let engines = work.appendingPathComponent("engines")
+        try fm.createDirectory(at: engines, withIntermediateDirectories: true)
+
+        try WineEngine.install(archive: archive, release: release(name: "wine-test"), enginesDirectory: engines)
+
+        let final = engines.appendingPathComponent("wine-test")
+        #expect(fm.isExecutableFile(atPath: final.appendingPathComponent("wswine.bundle/bin/wine").path))
+        let marker = try String(contentsOf: final.appendingPathComponent(".palium-verified"), encoding: .utf8)
+        #expect(marker == "abc123")
+        #expect(!fm.fileExists(atPath: engines.appendingPathComponent("wine-test.partial").path))
+    }
+
+    @Test func installRejectsArchiveWithoutWine() throws {
+        let fm = FileManager.default
+        let (archive, work) = try makeArchive(withWine: false)
+        defer { try? fm.removeItem(at: work) }
+        let engines = work.appendingPathComponent("engines")
+        try fm.createDirectory(at: engines, withIntermediateDirectories: true)
+
+        #expect(throws: PaliumError.self) {
+            try WineEngine.install(archive: archive, release: release(name: "wine-test"), enginesDirectory: engines)
+        }
+        #expect(!fm.fileExists(atPath: engines.appendingPathComponent("wine-test").path))
+        #expect(!fm.fileExists(atPath: engines.appendingPathComponent("wine-test.partial").path))
+    }
+
+    @Test func sha256OfKnownContent() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("sha_\(UUID())")
+        defer { try? FileManager.default.removeItem(at: file) }
+        try Data("abc".utf8).write(to: file)
+        #expect(try WineEngine.sha256Hex(of: file)
+            == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+    }
+}
+
+// MARK: - PrefixMigration Tests
+
+struct PrefixMigrationTests {
+
+    struct Sandbox {
+        let root: URL
+        let legacy: URL
+        let newPrefix: URL
+        let defaults: UserDefaults
+        let suite: String
+
+        var legacyGame: URL { PrefixMigration.paliaFolder(prefix: legacy, user: "crossover") }
+        var newGame: URL { PrefixMigration.paliaFolder(prefix: newPrefix, user: "player") }
+
+        func cleanUp() {
+            try? FileManager.default.removeItem(at: root)
+            defaults.removePersistentDomain(forName: suite)
+        }
+    }
+
+    /// An old GPTK prefix (user `crossover`, optionally with a game) and a new prefix
+    /// for user `player`.
+    private func makeSandbox(legacyHasGame: Bool = true) throws -> Sandbox {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("migration_\(UUID())")
+        let legacy = root.appendingPathComponent("prefix")
+        let newPrefix = root.appendingPathComponent("prefix-w11")
+        try fm.createDirectory(at: legacy.appendingPathComponent("drive_c/users/crossover"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: newPrefix.appendingPathComponent("drive_c/users/player"), withIntermediateDirectories: true)
+        try """
+        WINE REGISTRY Version 2
+
+        [Volatile Environment] 1782835665
+        "USERNAME"="crossover"
+
+        """.write(to: legacy.appendingPathComponent("user.reg"), atomically: true, encoding: .utf8)
+
+        if legacyHasGame {
+            let game = PrefixMigration.paliaFolder(prefix: legacy, user: "crossover")
+            try fm.createDirectory(at: game.appendingPathComponent("Client"), withIntermediateDirectories: true)
+            try fm.createDirectory(at: game.appendingPathComponent("Saved/Config"), withIntermediateDirectories: true)
+            try Data("exe".utf8).write(to: game.appendingPathComponent("Client/PaliaClient.exe"))
+            try Data("settings".utf8).write(to: game.appendingPathComponent("Saved/Config/GameUserSettings.ini"))
+        }
+        let suite = "palium-tests-\(UUID())"
+        return Sandbox(root: root, legacy: legacy, newPrefix: newPrefix,
+                       defaults: UserDefaults(suiteName: suite)!, suite: suite)
+    }
+
+    private func run(_ box: Sandbox, running: Bool = false, stopped: (() -> Void)? = nil) throws -> PrefixMigration.Outcome {
+        try PrefixMigration.run(
+            newPrefix: box.newPrefix,
+            newUser: "player",
+            legacyPrefix: box.legacy,
+            defaults: box.defaults,
+            isGameRunning: { running },
+            stopLegacyWine: { stopped?() }
+        )
+    }
+
+    /// Compares paths: directory URLs may or may not carry a trailing slash.
+    private func isMigrated(_ outcome: PrefixMigration.Outcome, _ box: Sandbox) -> Bool {
+        guard case .migrated(let from, let to) = outcome else { return false }
+        return from.path == box.legacyGame.path && to.path == box.newGame.path
+    }
+
+    private func inode(_ url: URL) throws -> UInt64 {
+        (try FileManager.default.attributesOfItem(atPath: url.path)[.systemFileNumber] as? UInt64) ?? 0
+    }
+
+    @Test func movesGameWithoutCopying() throws {
+        let box = try makeSandbox()
+        defer { box.cleanUp() }
+        let exeInode = try inode(box.legacyGame.appendingPathComponent("Client/PaliaClient.exe"))
+        var stoppedOldWine = false
+
+        let outcome = try run(box, stopped: { stoppedOldWine = true })
+
+        #expect(isMigrated(outcome, box))
+        #expect(stoppedOldWine)
+        #expect(PrefixMigration.hasGame(box.newGame))
+        #expect(!FileManager.default.fileExists(atPath: box.legacyGame.path))
+        // Same file, renamed: nothing was copied.
+        #expect(try inode(box.newGame.appendingPathComponent("Client/PaliaClient.exe")) == exeInode)
+        // Settings and logs travel with the game.
+        #expect(FileManager.default.fileExists(atPath: box.newGame.appendingPathComponent("Saved/Config/GameUserSettings.ini").path))
+        #expect(PrefixMigration.loadJournal(box.defaults)?.step == .done)
+        // The old prefix itself stays.
+        #expect(FileManager.default.fileExists(atPath: box.legacy.appendingPathComponent("user.reg").path))
+    }
+
+    @Test func secondRunHasNothingToDo() throws {
+        let box = try makeSandbox()
+        defer { box.cleanUp() }
+        _ = try run(box)
+        #expect(try run(box) == .nothingToMigrate)
+    }
+
+    @Test func freshInstallHasNothingToMigrate() throws {
+        let box = try makeSandbox(legacyHasGame: false)
+        defer { box.cleanUp() }
+        #expect(try run(box) == .nothingToMigrate)
+        try FileManager.default.removeItem(at: box.legacy)
+        #expect(try run(box) == .nothingToMigrate)
+    }
+
+    @Test func refusesWhileGameRuns() throws {
+        let box = try makeSandbox()
+        defer { box.cleanUp() }
+        #expect(throws: PrefixMigration.Failure.gameRunning) {
+            _ = try run(box, running: true)
+        }
+        #expect(PrefixMigration.hasGame(box.legacyGame))
+        #expect(PrefixMigration.loadJournal(box.defaults) == nil)
+    }
+
+    @Test func leavesBothWhenNewPrefixAlreadyHasGame() throws {
+        let box = try makeSandbox()
+        defer { box.cleanUp() }
+        let fm = FileManager.default
+        try fm.createDirectory(at: box.newGame.appendingPathComponent("Client"), withIntermediateDirectories: true)
+        try Data("new".utf8).write(to: box.newGame.appendingPathComponent("Client/PaliaClient.exe"))
+
+        guard case .newPrefixAlreadyHasGame(let legacyGame) = try run(box) else {
+            Issue.record("expected newPrefixAlreadyHasGame")
+            return
+        }
+        #expect(legacyGame.path == box.legacyGame.path)
+        #expect(PrefixMigration.hasGame(box.legacyGame))
+        #expect(try Data(contentsOf: box.newGame.appendingPathComponent("Client/PaliaClient.exe")) == Data("new".utf8))
+    }
+
+    @Test func setsAsideFolderWithoutGame() throws {
+        let box = try makeSandbox()
+        defer { box.cleanUp() }
+        let fm = FileManager.default
+        try fm.createDirectory(at: box.newGame.appendingPathComponent("Saved"), withIntermediateDirectories: true)
+
+        _ = try run(box)
+
+        #expect(PrefixMigration.hasGame(box.newGame))
+        let siblings = try fm.contentsOfDirectory(atPath: box.newGame.deletingLastPathComponent().path)
+        #expect(siblings.contains { $0.hasPrefix("Palia.before-migration-") })
+    }
+
+    @Test func finishesInterruptedMoveAfterRename() throws {
+        let box = try makeSandbox()
+        defer { box.cleanUp() }
+        let fm = FileManager.default
+        // Crash after the rename, before the journal said done.
+        let journal = PrefixMigration.Journal(step: .moving, source: box.legacyGame.path, destination: box.newGame.path)
+        box.defaults.set(try JSONEncoder().encode(journal), forKey: PrefixMigration.journalKey)
+        try fm.createDirectory(at: box.newGame.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.moveItem(at: box.legacyGame, to: box.newGame)
+
+        #expect(isMigrated(try run(box, running: true), box))
+        #expect(PrefixMigration.loadJournal(box.defaults)?.step == .done)
+    }
+
+    @Test func redoesMoveInterruptedBeforeRename() throws {
+        let box = try makeSandbox()
+        defer { box.cleanUp() }
+        // Crash after writing the journal, before the rename.
+        let journal = PrefixMigration.Journal(step: .moving, source: box.legacyGame.path, destination: box.newGame.path)
+        box.defaults.set(try JSONEncoder().encode(journal), forKey: PrefixMigration.journalKey)
+
+        #expect(isMigrated(try run(box), box))
+        #expect(PrefixMigration.hasGame(box.newGame))
     }
 }
 
