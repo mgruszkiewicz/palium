@@ -1,7 +1,8 @@
 import Foundation
 
-/// Moves an existing Palia install from Palium's old GPTK prefix into the Wine 11
-/// prefix, so users who update Palium keep their game without downloading it again.
+/// Moves an existing Palia install from Palium's old GPTK prefix (or from a broken
+/// Wine 11 prefix that was set aside) into the Wine 11 prefix, so users keep their
+/// game without downloading it again.
 ///
 /// The game folder (`AppData/Local/Palia`, holding `Client` and `Saved`) is moved
 /// with a single rename on the same volume, which is atomic: afterwards it exists at
@@ -15,6 +16,9 @@ nonisolated enum PrefixMigration {
         var step: Step
         var source: String
         var destination: String
+        /// The size check against the manifest has run since the move. Until then
+        /// every start checks again, so a failed start can't skip it.
+        var checked: Bool? = nil
     }
 
     enum Outcome: Equatable {
@@ -43,6 +47,21 @@ nonisolated enum PrefixMigration {
 
     static var legacyPrefix: URL {
         WineEngine.supportDirectory.appendingPathComponent("prefix")
+    }
+
+    /// Name prefix for a broken Wine 11 prefix moved aside before creating a new one.
+    static let stalePrefixMarker = ".stale-"
+
+    /// Where a game may be waiting to move: the old GPTK prefix, then set-aside
+    /// Wine 11 prefixes, newest first.
+    static func defaultSources(newPrefix: URL) -> [URL] {
+        let parent = newPrefix.deletingLastPathComponent()
+        let stalePrefix = newPrefix.lastPathComponent + stalePrefixMarker
+        let stale = ((try? FileManager.default.contentsOfDirectory(atPath: parent.path)) ?? [])
+            .filter { $0.hasPrefix(stalePrefix) }
+            .sorted(by: >)
+            .map { parent.appendingPathComponent($0) }
+        return [legacyPrefix] + stale
     }
 
     /// The Palia folder inside a prefix for `user`.
@@ -76,12 +95,13 @@ nonisolated enum PrefixMigration {
     /// Bring the game into `newPrefix` for `newUser`, if there is one to move.
     ///
     /// - Parameters:
+    ///   - sourcePrefixes: where to look for a game, in order (`defaultSources`).
     ///   - isGameRunning: true while any Palia process runs (checked before moving).
     ///   - stopLegacyWine: stops the old prefix's wineserver before the move.
     static func run(
         newPrefix: URL,
         newUser: String,
-        legacyPrefix: URL = legacyPrefix,
+        sourcePrefixes: [URL]? = nil,
         defaults: UserDefaults = .standard,
         isGameRunning: () -> Bool,
         stopLegacyWine: () -> Void,
@@ -108,7 +128,8 @@ nonisolated enum PrefixMigration {
         }
 
         // 2. Nothing to do when the new prefix already holds the game.
-        guard let source = findGame(inPrefix: legacyPrefix) else {
+        let sources = sourcePrefixes ?? defaultSources(newPrefix: newPrefix)
+        guard let source = sources.lazy.compactMap({ findGame(inPrefix: $0) }).first else {
             return .nothingToMigrate
         }
         if hasGame(destination) {
@@ -150,6 +171,20 @@ nonisolated enum PrefixMigration {
             return false
         }
         return va.isEqual(vb)
+    }
+
+    // MARK: - Check after the move
+
+    /// A game was moved and its files haven't been checked against the manifest yet.
+    static func needsPostMoveCheck(_ defaults: UserDefaults = .standard) -> Bool {
+        guard let journal = loadJournal(defaults) else { return false }
+        return journal.step == .done && journal.checked != true
+    }
+
+    static func markPostMoveChecked(_ defaults: UserDefaults = .standard) {
+        guard var journal = loadJournal(defaults), journal.step == .done else { return }
+        journal.checked = true
+        saveJournal(journal, defaults)
     }
 
     // MARK: - Journal

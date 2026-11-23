@@ -414,16 +414,11 @@ struct ContentView: View {
         appState.log("Checking system requirements...")
 
         // Wine engine, D3DMetal and prefix; moves an existing game from the old prefix.
-        var migratedGame = false
         do {
             appState.statusMessage = "Preparing Wine..."
             let prepared = try await WineManager.prepare(
-                onStatus: { [appState] status in
-                    Task { @MainActor in appState.statusMessage = status }
-                },
-                onLog: { [appState] message, level in
-                    Task { @MainActor in appState.log(message, level: level) }
-                }
+                onStatus: { [appState] status in appState.statusMessage = status },
+                onLog: { [appState] message, level in appState.log(message, level: level) }
             )
             let info = prepared.info
             appState.wineInfo = info
@@ -431,9 +426,6 @@ struct ContentView: View {
             appState.log("Wine: \(WineEngine.current.displayName)", level: .success)
             appState.log("Prefix: \(info.prefixPath.path)", level: .info)
             appState.log("Wine user: \(info.wineUsername)", level: .info)
-            if case .migrated = prepared.migration {
-                migratedGame = true
-            }
 
             // Install VC++ runtime if not already present in prefix
             if !WineManager.isVCRuntimeInstalled(info: info) {
@@ -468,7 +460,7 @@ struct ContentView: View {
             return
         } catch {
             appState.log("Setup failed: \(error.localizedDescription)", level: .error)
-            appState.phase = .needsSetup(.wineNotFound)
+            appState.phase = .needsSetup(.setupFailed(error.localizedDescription))
             return
         }
 
@@ -504,18 +496,26 @@ struct ContentView: View {
         if let info = appState.wineInfo, WineManager.isGameInstalled(info: info) {
             appState.log("Game found at \(info.gameInstallPath.path)", level: .success)
 
-            // After moving the game from the old prefix, check every file is there with
-            // the right size (no hashing, so it takes seconds); repair only what isn't.
-            if migratedGame, let manifest = appState.manifest {
+            // After the game was moved from the old prefix, check every file is there with
+            // the right size (no hashing, so it takes seconds). The journal keeps asking
+            // until a check, repair or download has actually run, so a failed start
+            // (offline, say) can't skip it.
+            if PrefixMigration.needsPostMoveCheck(), let manifest = appState.manifest {
                 let mismatched = DownloadManager.sizeMismatches(
                     manifest: manifest, installDirectory: info.gameInstallPath
                 )
-                if !mismatched.isEmpty && LaunchSettings.shared.installedVersion == appState.gameVersion {
-                    appState.log("\(mismatched.count) files differ after the move, repairing them", level: .warning)
+                let installed = LaunchSettings.shared.installedVersion
+                if mismatched.isEmpty {
+                    appState.log("All \(manifest.files.count) game files present after the move", level: .success)
+                    PrefixMigration.markPostMoveChecked()
+                } else if installed == nil || installed == appState.gameVersion {
+                    appState.log("\(mismatched.count) files missing or different after the move, repairing them", level: .warning)
                     await repair(files: mismatched, manifest: manifest, info: info)
                     return
+                } else {
+                    // A game update is due anyway; its download replaces these files too.
+                    appState.log("\(mismatched.count) files missing or different after the move; the game update will download them", level: .warning)
                 }
-                appState.log("All \(manifest.files.count) game files present after the move", level: .success)
             }
 
             let localVersion = LaunchSettings.shared.installedVersion
@@ -581,6 +581,7 @@ struct ContentView: View {
                 )
                 LaunchSettings.shared.installedVersion = appState.gameVersion
                 LaunchSettings.shared.installedManifestHash = manifest.contentsHash
+                PrefixMigration.markPostMoveChecked()
                 appState.phase = .ready
             } catch is CancellationError {
                 appState.log("Download cancelled", level: .warning)
@@ -656,6 +657,7 @@ struct ContentView: View {
             appState.statusMessage = "All files verified successfully"
             LaunchSettings.shared.installedVersion = appState.gameVersion
             LaunchSettings.shared.installedManifestHash = manifest.contentsHash
+            PrefixMigration.markPostMoveChecked()
             appState.phase = .ready
             return
         }
@@ -680,6 +682,7 @@ struct ContentView: View {
             )
             LaunchSettings.shared.installedVersion = appState.gameVersion
             LaunchSettings.shared.installedManifestHash = manifest.contentsHash
+            PrefixMigration.markPostMoveChecked()
             appState.phase = .ready
         } catch let error as PaliumError {
             appState.log("Repair failed: \(error.localizedDescription)", level: .error)

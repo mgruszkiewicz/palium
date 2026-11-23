@@ -107,11 +107,14 @@ def report(path, data, by_map):
         maps = {}
         for s in snaps:
             maps.setdefault(s["map"], []).append(s)
+        def median_text(values, width):
+            return f"{statistics.median(values):{width}.1f}" if values else "-".rjust(width)
+
         for name, group in sorted(maps.items(), key=lambda kv: -len(kv[1])):
             ft = [s["frame_time_average"] for s in group if "frame_time_average" in s]
             wf = [s["frame_time_max"] for s in group if "frame_time_max" in s]
-            print(f"   {name:30s} {len(group):4d} snaps   avg frame {statistics.median(ft):6.1f} ms"
-                  f"   worst-frame median {statistics.median(wf):7.1f} ms")
+            print(f"   {name:30s} {len(group):4d} snaps   avg frame {median_text(ft, 6)} ms"
+                  f"   worst-frame median {median_text(wf, 7)} ms")
     if data["errors"]:
         print(f"\n   {len(data['errors'])} renderer/engine errors, last ones:")
         for e in data["errors"][-5:]:

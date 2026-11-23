@@ -7,7 +7,8 @@ struct TroubleshootingTab: View {
     @State private var isReinstallingVC = false
     @State private var hasRun = false
     @State private var confirmDeletePrefix = false
-    @State private var hasLegacyPrefix = WineManager.hasLegacyPrefix
+    @State private var canRemoveLegacyPrefix = WineManager.canRemoveLegacyPrefix
+    @State private var isRemovingLegacyPrefix = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -124,11 +125,12 @@ struct TroubleshootingTab: View {
 
                 Spacer()
 
-                if hasLegacyPrefix {
-                    Button("Remove Old GPTK Prefix") {
+                if canRemoveLegacyPrefix {
+                    Button(isRemovingLegacyPrefix ? "Removing…" : "Remove Old GPTK Prefix") {
                         removeLegacyPrefix()
                     }
                     .controlSize(.small)
+                    .disabled(isRemovingLegacyPrefix)
                     .help("The Wine 7.7 prefix from before Palium moved to Wine 11. The game was moved out of it.")
                 }
 
@@ -276,12 +278,20 @@ struct TroubleshootingTab: View {
     }
 
     private func removeLegacyPrefix() {
-        do {
-            try WineManager.removeLegacyPrefix()
-            hasLegacyPrefix = false
-            logEntries.append(LogEntry(level: .success, message: "Removed the old GPTK prefix"))
-        } catch {
-            logEntries.append(LogEntry(level: .error, message: "Couldn't remove the old prefix: \(error.localizedDescription)"))
+        isRemovingLegacyPrefix = true
+        Task {
+            // Thousands of files: delete off the main actor so the window stays responsive.
+            let result = await Task.detached(priority: .utility) { () -> Result<Void, Error> in
+                Result { try WineManager.removeLegacyPrefix() }
+            }.value
+            switch result {
+            case .success:
+                logEntries.append(LogEntry(level: .success, message: "Removed the old GPTK prefix"))
+            case .failure(let error):
+                logEntries.append(LogEntry(level: .error, message: "Couldn't remove the old prefix: \(error.localizedDescription)"))
+            }
+            canRemoveLegacyPrefix = WineManager.canRemoveLegacyPrefix
+            isRemovingLegacyPrefix = false
         }
     }
 }

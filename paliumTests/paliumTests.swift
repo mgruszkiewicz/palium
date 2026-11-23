@@ -298,6 +298,8 @@ struct PaliumErrorTests {
             .prefixInitFailed("reason"),
             .engineInstallFailed("reason"),
             .migrationFailed("reason"),
+            .setupFailed("reason"),
+            .oldPrefixHasGame("/path"),
         ]
         for error in errors {
             #expect(error.errorDescription != nil)
@@ -741,14 +743,14 @@ struct WineEngineTests {
         WineEngine.Release(name: name, displayName: "test", sha256: "abc123", downloadSize: 1, urls: [])
     }
 
-    @Test func installUnpacksIntoPlaceWithMarker() throws {
+    @Test func installUnpacksIntoPlaceWithMarker() async throws {
         let fm = FileManager.default
         let (archive, work) = try makeArchive(withWine: true)
         defer { try? fm.removeItem(at: work) }
         let engines = work.appendingPathComponent("engines")
         try fm.createDirectory(at: engines, withIntermediateDirectories: true)
 
-        try WineEngine.install(archive: archive, release: release(name: "wine-test"), enginesDirectory: engines)
+        try await WineEngine.install(archive: archive, release: release(name: "wine-test"), enginesDirectory: engines)
 
         let final = engines.appendingPathComponent("wine-test")
         #expect(fm.isExecutableFile(atPath: final.appendingPathComponent("wswine.bundle/bin/wine").path))
@@ -757,15 +759,15 @@ struct WineEngineTests {
         #expect(!fm.fileExists(atPath: engines.appendingPathComponent("wine-test.partial").path))
     }
 
-    @Test func installRejectsArchiveWithoutWine() throws {
+    @Test func installRejectsArchiveWithoutWine() async throws {
         let fm = FileManager.default
         let (archive, work) = try makeArchive(withWine: false)
         defer { try? fm.removeItem(at: work) }
         let engines = work.appendingPathComponent("engines")
         try fm.createDirectory(at: engines, withIntermediateDirectories: true)
 
-        #expect(throws: PaliumError.self) {
-            try WineEngine.install(archive: archive, release: release(name: "wine-test"), enginesDirectory: engines)
+        await #expect(throws: PaliumError.self) {
+            try await WineEngine.install(archive: archive, release: release(name: "wine-test"), enginesDirectory: engines)
         }
         #expect(!fm.fileExists(atPath: engines.appendingPathComponent("wine-test").path))
         #expect(!fm.fileExists(atPath: engines.appendingPathComponent("wine-test.partial").path))
@@ -833,7 +835,7 @@ struct PrefixMigrationTests {
         try PrefixMigration.run(
             newPrefix: box.newPrefix,
             newUser: "player",
-            legacyPrefix: box.legacy,
+            sourcePrefixes: [box.legacy],
             defaults: box.defaults,
             isGameRunning: { running },
             stopLegacyWine: { stopped?() }
@@ -948,6 +950,70 @@ struct PrefixMigrationTests {
 
         #expect(isMigrated(try run(box), box))
         #expect(PrefixMigration.hasGame(box.newGame))
+    }
+
+    @Test func movesGameFromSetAsidePrefix() throws {
+        let box = try makeSandbox(legacyHasGame: false)
+        defer { box.cleanUp() }
+        let fm = FileManager.default
+        // An incomplete Wine 11 prefix that still held the game, moved aside by createPrefix.
+        let stale = WineManager.setAsideURL(for: box.newPrefix, date: Date(timeIntervalSince1970: 100))
+        let staleGame = PrefixMigration.paliaFolder(prefix: stale, user: "player")
+        try fm.createDirectory(at: staleGame.appendingPathComponent("Client"), withIntermediateDirectories: true)
+        try Data("exe".utf8).write(to: staleGame.appendingPathComponent("Client/PaliaClient.exe"))
+
+        let sources = PrefixMigration.defaultSources(newPrefix: box.newPrefix)
+        #expect(sources.first == PrefixMigration.legacyPrefix)
+        #expect(sources.dropFirst().map(\.lastPathComponent) == [stale.lastPathComponent])
+
+        let outcome = try PrefixMigration.run(
+            newPrefix: box.newPrefix, newUser: "player",
+            sourcePrefixes: [box.legacy, stale], defaults: box.defaults,
+            isGameRunning: { false }, stopLegacyWine: {}
+        )
+        guard case .migrated(let from, _) = outcome else {
+            Issue.record("expected a migration, got \(outcome)")
+            return
+        }
+        #expect(from.path == staleGame.path)
+        #expect(PrefixMigration.hasGame(box.newGame))
+    }
+
+    @Test func setAsidePrefixesSortNewestFirst() throws {
+        let box = try makeSandbox(legacyHasGame: false)
+        defer { box.cleanUp() }
+        let fm = FileManager.default
+        let older = WineManager.setAsideURL(for: box.newPrefix, date: Date(timeIntervalSince1970: 1_000))
+        let newer = WineManager.setAsideURL(for: box.newPrefix, date: Date(timeIntervalSince1970: 2_000))
+        try fm.createDirectory(at: older, withIntermediateDirectories: true)
+        try fm.createDirectory(at: newer, withIntermediateDirectories: true)
+        #expect(older.lastPathComponent == "prefix-w11.stale-1000")
+
+        let names = PrefixMigration.defaultSources(newPrefix: box.newPrefix).dropFirst().map(\.lastPathComponent)
+        #expect(names == ["prefix-w11.stale-2000", "prefix-w11.stale-1000"])
+    }
+
+    @Test func postMoveCheckStaysPendingUntilMarked() throws {
+        let box = try makeSandbox()
+        defer { box.cleanUp() }
+        #expect(!PrefixMigration.needsPostMoveCheck(box.defaults))
+
+        _ = try run(box)
+        #expect(PrefixMigration.needsPostMoveCheck(box.defaults))
+        // A later start that finds nothing to move still owes the check.
+        _ = try run(box)
+        #expect(PrefixMigration.needsPostMoveCheck(box.defaults))
+
+        PrefixMigration.markPostMoveChecked(box.defaults)
+        #expect(!PrefixMigration.needsPostMoveCheck(box.defaults))
+    }
+
+    @Test func journalWithoutCheckedFieldDecodes() throws {
+        // Journals written before `checked` existed must still load.
+        let old = Data(#"{"step":"done","source":"/a","destination":"/b"}"#.utf8)
+        let journal = try JSONDecoder().decode(PrefixMigration.Journal.self, from: old)
+        #expect(journal.step == .done)
+        #expect(journal.checked == nil)
     }
 }
 

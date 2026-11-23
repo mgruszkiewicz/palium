@@ -9,6 +9,10 @@ import Foundation
 /// only after extraction succeeded, so a half-installed engine is never used.
 nonisolated enum WineEngine {
 
+    /// Log callback that runs on the main actor; callers `await` it, so messages
+    /// arrive in order.
+    typealias Log = @MainActor @Sendable (String, LogEntry.Level) -> Void
+
     struct Release: Sendable {
         /// Folder name under `engines/`; also shown in the UI.
         let name: String
@@ -67,7 +71,7 @@ nonisolated enum WineEngine {
     /// Download, verify and unpack the engine if it isn't installed yet.
     static func ensureInstalled(
         _ release: Release = current,
-        onLog: @escaping @Sendable (String, LogEntry.Level) -> Void = { _, _ in }
+        onLog: @escaping Log = { _, _ in }
     ) async throws {
         if isInstalled(release) { return }
 
@@ -75,7 +79,7 @@ nonisolated enum WineEngine {
         try fm.createDirectory(at: enginesDirectory, withIntermediateDirectories: true)
         try checkFreeSpace(needed: release.downloadSize * 5, at: enginesDirectory)
 
-        onLog("Downloading \(release.displayName) (\(formatSize(UInt64(release.downloadSize))))...", .info)
+        await onLog("Downloading \(release.displayName) (\(formatSize(UInt64(release.downloadSize))))...", .info)
         let archive = try await download(release, onLog: onLog)
         defer { try? fm.removeItem(at: archive) }
 
@@ -85,32 +89,37 @@ nonisolated enum WineEngine {
                 "checksum mismatch (expected \(release.sha256.prefix(12))…, got \(digest.prefix(12))…)"
             )
         }
-        onLog("Wine engine checksum verified", .success)
+        await onLog("Wine engine checksum verified", .success)
 
-        try install(archive: archive, release: release)
-        onLog("Installed \(release.displayName)", .success)
+        try await install(archive: archive, release: release)
+        await onLog("Installed \(release.displayName)", .success)
     }
 
     /// Unpack a verified archive into place. Exposed for tests.
-    static func install(archive: URL, release: Release, enginesDirectory: URL = enginesDirectory) throws {
+    static func install(archive: URL, release: Release, enginesDirectory: URL = enginesDirectory) async throws {
         let fm = FileManager.default
         let final = enginesDirectory.appendingPathComponent(release.name)
         let partial = enginesDirectory.appendingPathComponent(release.name + ".partial")
         try? fm.removeItem(at: partial)
         try fm.createDirectory(at: partial, withIntermediateDirectories: true)
 
-        let tar = Process()
-        tar.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        tar.arguments = ["-xJf", archive.path, "-C", partial.path]
-        let errPipe = Pipe()
-        tar.standardError = errPipe
-        tar.standardOutput = FileHandle.nullDevice
-        try tar.run()
-        tar.waitUntilExit()
-        guard tar.terminationStatus == 0 else {
-            let message = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        // tar's messages go to a file: a pipe nobody reads until tar exits fills up
+        // after about 64 KB of warnings and leaves tar blocked forever.
+        let errorLog = enginesDirectory.appendingPathComponent(release.name + ".tar-errors.log")
+        fm.createFile(atPath: errorLog.path, contents: nil)
+        defer { try? fm.removeItem(at: errorLog) }
+        let errorHandle = try FileHandle(forWritingTo: errorLog)
+        defer { try? errorHandle.close() }
+
+        let status = try await runProcess(
+            URL(fileURLWithPath: "/usr/bin/tar"),
+            arguments: ["-xJf", archive.path, "-C", partial.path],
+            standardError: errorHandle
+        )
+        guard status == 0 else {
+            let message = (try? String(contentsOf: errorLog, encoding: .utf8)) ?? ""
             try? fm.removeItem(at: partial)
-            throw PaliumError.engineInstallFailed("extracting failed: \(message.prefix(200))")
+            throw PaliumError.engineInstallFailed("extracting failed: \(message.suffix(300))")
         }
 
         let wine = partial.appendingPathComponent("wswine.bundle/bin/wine")
@@ -126,9 +135,27 @@ nonisolated enum WineEngine {
         try fm.moveItem(at: partial, to: final)
     }
 
+    /// Run a process without blocking a thread while it works.
+    private static func runProcess(_ executable: URL, arguments: [String], standardError: FileHandle) async throws -> Int32 {
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = standardError
+        return try await withCheckedThrowingContinuation { continuation in
+            process.terminationHandler = { continuation.resume(returning: $0.terminationStatus) }
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                continuation.resume(throwing: error)
+            }
+        }
+    }
+
     private static func download(
         _ release: Release,
-        onLog: @escaping @Sendable (String, LogEntry.Level) -> Void
+        onLog: @escaping Log
     ) async throws -> URL {
         var lastError: Error?
         for url in release.urls {
@@ -145,7 +172,7 @@ nonisolated enum WineEngine {
                 return kept
             } catch {
                 lastError = error
-                onLog("Engine download from \(url.host() ?? "?") failed: \(error.localizedDescription)", .warning)
+                await onLog("Engine download from \(url.host() ?? "?") failed: \(error.localizedDescription)", .warning)
             }
         }
         throw PaliumError.engineInstallFailed(lastError?.localizedDescription ?? "no download source")

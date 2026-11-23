@@ -14,6 +14,8 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
     case prefixInitFailed(String)
     case engineInstallFailed(String)
     case migrationFailed(String)
+    case setupFailed(String)
+    case oldPrefixHasGame(String)
 
 
     var isWineNotFound: Bool {
@@ -45,6 +47,10 @@ enum PaliumError: LocalizedError, Sendable, Equatable {
             return "Couldn't install the Wine engine: \(reason)"
         case .migrationFailed(let reason):
             return reason
+        case .setupFailed(let reason):
+            return "Setup failed: \(reason)"
+        case .oldPrefixHasGame(let path):
+            return "The old GPTK prefix still holds a game install (\(path)), so it was not removed."
         }
     }
 }
