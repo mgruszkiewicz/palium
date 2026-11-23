@@ -6,6 +6,16 @@
         <description>Most recent Palium releases</description>
         <language>en</language>
         <item>
+            <title>Version 1.2.0</title>
+            <sparkle:version>12</sparkle:version>
+            <sparkle:shortVersionString>1.2.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.7</sparkle:minimumSystemVersion>
+            <sparkle:releaseNotesLink>https://mgruszkiewicz.github.io/palium/notes/1.2.0.html</sparkle:releaseNotesLink>
+            <sparkle:fullReleaseNotesLink>https://github.com/mgruszkiewicz/palium/releases</sparkle:fullReleaseNotesLink>
+            <pubDate>Mon, 23 Nov 2026 19:43:44 +0000</pubDate>
+            <enclosure url="https://github.com/mgruszkiewicz/palium/releases/download/v1.2.0/Palium-1.2.0.zip" sparkle:edSignature="dV2uFatyQo5o7rqLu79lnBLBGphpoAKkjM+kpj7vkPU0HT1SVs/FQekH2L6KZggKY+GhpQz0nGC6x+DbqvwmAA==" length="1476296" type="application/octet-stream" />
+        </item>
+        <item>
             <title>Version 1.1.0</title>
             <sparkle:version>10</sparkle:version>
             <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
