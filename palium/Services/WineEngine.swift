@@ -28,8 +28,10 @@ nonisolated enum WineEngine {
         sha256: "67e29fb3d74f363af39c69ba11f9b13a79812c5db07cf4748672658e4a200a0e",
         downloadSize: 167_322_744,
         urls: [
-            // A copy in Palium's own releases goes first once it is published, so
+            // Palium's own copy, published by .github/workflows/engine-mirror.yml, so
             // upstream replacing or removing the asset can't break installs.
+            URL(string: "https://github.com/mgruszkiewicz/palium/releases/download/engine-wine-11.0_1/WS12WineSikarugir11.0_1.tar.xz")!,
+            // The original. Both are checked against `sha256`.
             URL(string: "https://github.com/Sikarugir-App/Engines/releases/download/v1.0/WS12WineSikarugir11.0_1.tar.xz")!,
         ]
     )

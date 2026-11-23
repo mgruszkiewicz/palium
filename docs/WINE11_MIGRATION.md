@@ -1,6 +1,6 @@
 # Plan: move Palium to Wine 11
 
-Status: steps 1–4 implemented on 2026-11-23 (engine, D3DMetal links, prefix, migration, UI); not yet tested end to end through Sparkle. The engine mirror (step 5) is not published yet.
+Status: steps 1–4 implemented on 2026-11-23 (engine, D3DMetal links, prefix, migration, UI); not yet tested end to end through Sparkle. The engine mirror workflow exists (`engine-mirror.yml`, see `docs/RELEASING.md`); the first engine release is published after merging.
 
 ## Why
 
